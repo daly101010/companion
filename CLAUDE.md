@@ -96,8 +96,9 @@ the mini window still work. The chosen mode persists, so it reopens the same way
   Persisted in `fight_cast`; rendered as the "Casts" card (live) and under the
   history breakdown.
 - **Heals are per-spell with overheal** and are excluded from damage totals:
-  `You healed <tgt> for N (M) hit points by <Spell>` → ability row keyed by
-  spell name, effective N, `over = M-N` (persisted as `fight_ability.over_total`,
+  `You healed <tgt> for N (M) hit points by <Spell>` → ability row keyed
+  `source|spell|heal` (kind `heal`; a lifetap's damage row stays `source|spell`, so
+  damage and heal never share a row), effective N, `over = M-N` (persisted as `fight_ability.over_total`,
   fight-level `heal_total`/`overheal`). The no-`(M)` pattern's handler skips
   `(M)` lines (both patterns match those — that's the expected
   `my_heal+my_heal_over` overlap in the validator). Heals previously leaked

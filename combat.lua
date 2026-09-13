@@ -254,8 +254,12 @@ local function record(ev)
         return
     end
 
-    -- outgoing: ability rollup keyed by source+ability (drives the breakdown)
+    -- outgoing: ability rollup keyed by source+ability (drives the breakdown).
+    -- Heals get their own row (key suffix |heal, kind 'heal'): a lifetap's damage line and
+    -- its "You healed <me> ... by <tap>" line must not share one row, or the damage view
+    -- counts the heal and the heal view never sees it.
     local key = (ev.source or '?') .. '|' .. (ev.ability or '?')
+    if ev.kind == 'heal' then key = key .. '|heal' end
     local a = enc.abilities[key]
     if not a then
         a = { source = ev.source, ability = ev.ability, kind = ev.kind,
@@ -430,11 +434,14 @@ end
 -- Classify a cast by what its spell was observed doing this fight.
 local function classifyCast(enc, c)
     if c.activations > 0 then return 'activate' end
-    local a = enc.abilities[(c.source or '?') .. '|' .. (c.spell or '?')]
+    local k = (c.source or '?') .. '|' .. (c.spell or '?')
+    local a = enc.abilities[k]
     if a then
         if a.kind == 'heal' then return 'heal' end
         if a.kind == 'nuke' or a.kind == 'dot' then return 'damage' end
     end
+    -- heals roll up under source|spell|heal; a lifetap's damage row above wins
+    if enc.abilities[k .. '|heal'] then return 'heal' end
     if c.isSong then return 'song' end
     return 'other' -- buff / utility / never landed
 end
