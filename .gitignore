@@ -1,0 +1,8 @@
+# Feature snapshots (pre-git convention; kept on disk, not tracked)
+*.bak-*
+*.bak
+*.orig
+# Runtime scratch
+*.log
+.superpowers/
+__pycache__/
