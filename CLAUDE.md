@@ -73,6 +73,13 @@ the mini window still work. The chosen mode persists, so it reopens the same way
 - **Vector-returning ImGui calls give plain numbers here**
   (`GetContentRegionAvail`, `GetCursorScreenPos`, `CalcTextSize` → `x, y`). The
   `*Vec` variants return ImVec2; we don't use those.
+- **Raw event log has two budgets** (`combat.lua:pushEvent`): my own lines, incoming to me,
+  kills, deaths and fades count against `M.maxOwnEvents`; other players' lines against
+  `M.maxEvents` (both 4000). A single cap let a raid's third-person melee fill the log 57-90 s
+  into boss fights, dropping every later own cast/resist that necrobrain's history and the
+  post-mortem read (rollups were never affected). **Every new `enc.events` append must go
+  through `pushEvent`** with the right priority. My own casts made with no encounter open are
+  held `M.prePullCastSec` (6 s) and attached at t=0 to the encounter the first damage opens.
 - **Event dedup:** first-person (`You ...`) and third-person (`#1# ...s ...`)
   patterns can both match your own lines; `outgoing()` early-returns on
   attacker `You` so damage is counted once.

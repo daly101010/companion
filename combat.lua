@@ -17,7 +17,9 @@ local M  = {}
 
 -- ── config / wiring ───────────────────────────────────────────────────
 M.timeoutSec = 12   -- gap that closes an encounter
-M.maxEvents  = 4000 -- per-encounter raw event cap (timeline + persistence)
+M.maxEvents  = 4000 -- per-encounter raw event cap for other players' lines (timeline + persistence)
+M.maxOwnEvents = 4000 -- separate cap for my own lines, incoming to me, kills, deaths, fades
+M.prePullCastSec = 6  -- my casts this long before the first damage line attach to that encounter
 
 local cb = {
     onFinalize   = nil, -- fn(fight)  called when an encounter closes
@@ -113,6 +115,8 @@ local function newEncounter()
         healBy     = {}, -- healer name -> { total, over, activeSec, lastBucket, targets={tgt->{total,over}} }
         healRecv   = {}, -- target name -> { total, over } (healing received, all healers)
         events     = {},
+        ownEvents   = 0, -- events appended under M.maxOwnEvents (see pushEvent)
+        otherEvents = 0, -- events appended under M.maxEvents
         buckets    = {}, -- integer second -> player damage (for live dps line)
         kindSeries = {}, -- source -> kind -> { second -> damage } (stacked dps chart)
         playerDmg  = 0,
@@ -134,10 +138,53 @@ local function newEncounter()
     }
 end
 
+-- Raw event log with two budgets. A raid's third-person melee filled the single 4000-event cap
+-- 57-90 s into boss fights (Anguish 2026-09-13), silently dropping every later own cast/resist
+-- that necrobrain's history and the death post-mortem read. `priority` events (my own lines,
+-- incoming to me, kills, deaths, fades) count against M.maxOwnEvents; everything else against
+-- M.maxEvents. Returns the appended index, or nil when that budget is full.
+local function pushEvent(enc, e, priority)
+    if priority then
+        if enc.ownEvents >= M.maxOwnEvents then return nil end
+        enc.ownEvents = enc.ownEvents + 1
+    else
+        if enc.otherEvents >= M.maxEvents then return nil end
+        enc.otherEvents = enc.otherEvents + 1
+    end
+    enc.events[#enc.events + 1] = e
+    return #enc.events
+end
+
+-- My casts with no encounter open (the pull's first DoT usually starts before any damage line):
+-- held for M.prePullCastSec and attached at t=0 to the encounter the first damage opens.
+local pendingCasts = {} -- { clock, caster, spell, target }
+
+local function attachPrePullCasts(enc)
+    local cutoff = enc.startClock - M.prePullCastSec
+    for _, p in ipairs(pendingCasts) do
+        if p.clock >= cutoff then
+            local key = p.caster .. '|' .. p.spell
+            local c = enc.casts[key]
+            if not c then
+                c = { source = p.caster, spell = p.spell, casts = 0, fizzles = 0, interrupts = 0,
+                    blocked = 0, activations = 0 }
+                enc.casts[key] = c
+            end
+            c.casts = c.casts + 1
+            pushEvent(enc, { t = 0, source = p.caster, target = p.target, ability = p.spell,
+                kind = 'cast', amount = 0, crit = false, outcome = 'cast' }, true)
+        end
+    end
+    pendingCasts = {}
+end
+
 -- `refresh` (default true) bumps the activity clock. Casts pass false so a
 -- stream of buff casts can't hold a fight open past its damage.
 local function ensureActive(refresh)
-    if not active then active = newEncounter() end
+    if not active then
+        active = newEncounter()
+        attachPrePullCasts(active)
+    end
     if refresh ~= false then active.lastClock = now() end
     return active
 end
@@ -223,8 +270,8 @@ local function record(ev)
     -- event log (capped). Skip pure-overheal ticks (heal with 0 effective) —
     -- some procs/HoTs spam thousands of "for 0 (M)" lines and would blow the cap;
     -- their overheal is still counted in the rollup below.
-    if #enc.events < M.maxEvents and not (ev.kind == 'heal' and (ev.amount or 0) <= 0) then
-        enc.events[#enc.events + 1] = {
+    if not (ev.kind == 'heal' and (ev.amount or 0) <= 0) then
+        pushEvent(enc, {
             t       = enc.lastClock - enc.startClock,
             source  = ev.source,
             target  = ev.target,
@@ -233,7 +280,7 @@ local function record(ev)
             amount  = ev.amount or 0,
             crit    = crit,
             outcome = ev.outcome,
-        }
+        }, ev.mine or ev.incoming or isMe(ev.source))
     end
 
     -- incoming damage only contributes to the incoming total; it must not land
@@ -407,17 +454,26 @@ local function recordCast(caster, spell, field, evKind)
             printf('\ar[companion]\ax event hook failed (silenced): %s', tostring(err))
         end
     end
+    if not active and field == 'casts' and isMe(caster) then
+        local t = now()
+        local keep = {}
+        for _, p in ipairs(pendingCasts) do
+            if (t - p.clock) <= M.prePullCastSec then keep[#keep + 1] = p end
+        end
+        keep[#keep + 1] = { clock = t, caster = caster, spell = spell, target = ownCastTarget or '' }
+        pendingCasts = keep
+    end
     local c = castEntry(caster, spell)
-    if not c then return end -- no active fight: ignore out-of-combat casts/songs
+    if not c then return end -- no active fight: only my own casts are held (pendingCasts) for the pull
     c[field] = c[field] + 1
     if evKind == 'song' then c.isSong = true end
     -- time-stamp casts/activations into the event log so the timeline can show
     -- WHEN a spell/song/disc/AA/clicky was used (persisted like any other event).
     if field == 'casts' or field == 'activations' or FAIL_OUTCOME[field] then
         local enc = active -- castEntry just ensured it
-        if enc and #enc.events < M.maxEvents then
+        if enc then
             local isFail = FAIL_OUTCOME[field] ~= nil
-            enc.events[#enc.events + 1] = {
+            pushEvent(enc, {
                 t       = now() - enc.startClock,
                 source  = caster,
                 target  = ownCastTarget or '',
@@ -426,7 +482,7 @@ local function recordCast(caster, spell, field, evKind)
                 amount  = 0,
                 crit    = false,
                 outcome = isFail and FAIL_OUTCOME[field] or 'cast',
-            }
+            }, isMe(caster))
         end
     end
 end
@@ -710,12 +766,9 @@ function M.recordDeath(killer)
     local enc = ensureActive()
     enc.deaths = enc.deaths + 1
     local relT = t - enc.startClock
-    local eventIndex = nil -- index of the death event, nil when the log is at its cap
-    if #enc.events < M.maxEvents then
-        enc.events[#enc.events + 1] = { t = relT, source = killer or '?', target = cb.playerName(),
-            ability = 'Death', kind = 'death', amount = 0, crit = false, outcome = 'death' }
-        eventIndex = #enc.events
-    end
+    -- index of the death event, nil only when the own-line budget is full
+    local eventIndex = pushEvent(enc, { t = relT, source = killer or '?', target = cb.playerName(),
+        ability = 'Death', kind = 'death', amount = 0, crit = false, outcome = 'death' }, true)
     local samples = nil
     if cb.freezeBlackBox then
         local ok, s = pcall(cb.freezeBlackBox, mq.gettime())
@@ -935,10 +988,8 @@ function M.registerEvents()
     -- deaths
     reg('cmp_kill_you', "You have slain #1#!#*#", function(_, target)
         local enc = ensureActive()
-        if #enc.events < M.maxEvents then
-            enc.events[#enc.events + 1] = { t = enc.lastClock - enc.startClock, source = cb.playerName(),
-                target = target, ability = 'Kill', kind = 'kill', amount = 0, outcome = 'kill' }
-        end
+        pushEvent(enc, { t = enc.lastClock - enc.startClock, source = cb.playerName(),
+            target = target, ability = 'Kill', kind = 'kill', amount = 0, outcome = 'kill' }, true)
     end)
     -- most kills are made by the tank, not us: record the same shape as
     -- cmp_kill_you but only when a fight is already open (a bystander kill
@@ -947,10 +998,8 @@ function M.registerEvents()
     reg('cmp_kill_other', "#1# has been slain by #2#!#*#", function(_, target, killer)
         if not active then return end
         local enc = ensureActive(false)
-        if #enc.events < M.maxEvents then
-            enc.events[#enc.events + 1] = { t = enc.lastClock - enc.startClock, source = killer,
-                target = target, ability = 'Kill', kind = 'kill', amount = 0, outcome = 'kill' }
-        end
+        pushEvent(enc, { t = enc.lastClock - enc.startClock, source = killer,
+            target = target, ability = 'Kill', kind = 'kill', amount = 0, outcome = 'kill' }, true)
     end)
     -- my death: chat-line entry points into M.recordDeath (deduped there)
     reg('cmp_death_me', "You have been slain by #1#!#*#", function(_, killer) M.recordDeath(killer) end)
@@ -962,10 +1011,8 @@ function M.registerEvents()
     reg('cmp_wornoff', "Your #1# spell has worn off.#*#", function(_, spell)
         if not active then return end
         local enc = ensureActive(false)
-        if #enc.events < M.maxEvents then
-            enc.events[#enc.events + 1] = { t = now() - enc.startClock, source = me, target = me,
-                ability = spell, kind = 'wornoff', amount = 0, crit = false, outcome = 'fade' }
-        end
+        pushEvent(enc, { t = now() - enc.startClock, source = me, target = me,
+            ability = spell, kind = 'wornoff', amount = 0, crit = false, outcome = 'fade' }, true)
     end)
 end
 

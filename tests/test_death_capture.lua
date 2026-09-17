@@ -98,14 +98,15 @@ check('killer back-filled', getActive().deathRecords[2].killer == 'a bat', getAc
 local ev = getActive().events[getActive().deathRecords[2].eventIndex]
 check('death event killer back-filled', ev.kind == 'death' and ev.source == 'a bat')
 
--- at the event cap: no death event is appended, eventIndex must be nil (not a stale index)
+-- deaths use the own-line budget (combat.lua pushEvent): a full other-player cap never drops
+-- one; only a full own budget does, and then eventIndex must be nil (not a stale index)
 clock = 55000
-local savedMax = Combat.maxEvents
-Combat.maxEvents = #getActive().events
+local savedOwn = Combat.maxOwnEvents
+Combat.maxOwnEvents = getActive().ownEvents
 check('capped death recorded', Combat.recordDeath('a wolf') == true)
 check('deaths = 3', getActive().deaths == 3, getActive().deaths)
 check('eventIndex nil at cap', getActive().deathRecords[3].eventIndex == nil, tostring(getActive().deathRecords[3].eventIndex))
-Combat.maxEvents = savedMax
+Combat.maxOwnEvents = savedOwn
 
 -- deaths_detail survives finalize
 clock = 80000
