@@ -150,12 +150,15 @@ Runtime tunables live in `S.settings` and persist as `set_*` pref keys
   only; fight/ability rollups are kept forever).
 - **miniRows** → `drawMini` row cap.
 - **share** → `Group.setEnabled` (group-sharing on/off).
-- **groupOnly** → meter scope (`set_grouponly`). When on, the mini meter, the
-  Live "Damage by source" card and the Healing tab's healer meter keep only rows
-  that pass `ui.lua:inGroupScope`: me, my group members (`S.roster`, fed by
-  `UI.setRoster()` from the black-box sample's `group` array in both main loops),
-  companion peers (`freshPeers()`), and any of those players' pets (owner parsed
-  off the normalized `` <Owner>`s pet `` name). Also toggled by the `all | group`
+- **scope** → meter scope `all | group | raid` (`set_scope`; a legacy
+  `set_grouponly=1` loads as `group`). Off `all`, the mini meter, the Live
+  "Damage by source" card and the Healing tab's healer meter keep only rows that
+  pass `ui.lua:inScope`: me, companion peers (`freshPeers()`), the roster
+  (`group`: `S.roster`, fed by `UI.setRoster()` from the black-box sample's
+  `group` array; `raid`: that plus `S.raid`, fed by `UI.setRaidRoster()` from
+  `tloReaders().raid()` polled every 5 s by both main loops -- deliberately not
+  part of the 2 Hz sample), and any of those players' pets (owner parsed off the
+  normalized `` <Owner>`s pet `` name). Also toggled by the `all | group | raid`
   switch on the mini header and those two card headers. History is never scoped.
   Test: `luajit tests/test_meter_scope.lua`.
 The tab also has a **Reset window position/size** button (sets `S._win` +

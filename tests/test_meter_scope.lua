@@ -55,14 +55,38 @@ check('old member dropped',       inScope({ name = 'Healbot' }) == false)
 UI.setRoster(nil)
 check('nil sample keeps roster',  inScope({ name = 'Newguy' }))
 
--- ── persistence: set_grouponly round-trips through prefs ──
-check('off by default', UI.groupOnly() == false)
-UI.setGroupOnly(true)
+-- ── raid scope: group roster + raid roster + peers + their pets ──
+UI.setRoster({ 'Healbot' })
+UI.setRaidRoster({ { name = 'Raidwiz' }, 'Raidclr' })
+check('raid member out of group scope', UI.inScope({ name = 'Raidwiz' }, 'group') == false)
+check('raid member in raid scope',      UI.inScope({ name = 'Raidwiz' }, 'raid'))
+check('bare-name raid roster entry',    UI.inScope({ name = 'raidclr' }, 'raid'))
+check('group member also in raid scope', UI.inScope({ name = 'Healbot' }, 'raid'))
+check('raid member pet in raid scope',  UI.inScope({ name = 'Raidwiz`s pet' }, 'raid'))
+check('stranger out of raid scope',     UI.inScope({ name = 'Randomdude' }, 'raid') == false)
+check('mob out of raid scope',          UI.inScope({ name = 'a raid boss' }, 'raid') == false)
+check('peer in raid scope',             UI.inScope({ name = 'Boxmage', peer = true }, 'raid'))
+check('all scope passes everything',    UI.inScope({ name = 'a raid boss' }, 'all'))
+UI.setRaidRoster(nil)
+check('nil raid sample keeps roster',   UI.inScope({ name = 'Raidwiz' }, 'raid'))
+UI.setRaidRoster({})
+check('empty raid clears roster',       UI.inScope({ name = 'Raidwiz' }, 'raid') == false)
+
+-- ── persistence: set_scope round-trips; the old set_grouponly pref migrates ──
+check('all by default', UI.scope() == 'all')
+UI.setScope('raid')
 UI.savePrefs()
-check('saved as set_grouponly=1', prefs.set_grouponly == '1', prefs.set_grouponly)
-UI.setGroupOnly(false)
+check('saved as set_scope=raid', prefs.set_scope == 'raid', prefs.set_scope)
+UI.setScope('all')
 UI.loadPrefs()
-check('loadPrefs restores it', UI.groupOnly() == true)
+check('loadPrefs restores it', UI.scope() == 'raid')
+prefs.set_scope = nil; prefs.set_grouponly = '1'
+UI.loadPrefs()
+check('legacy set_grouponly=1 becomes group', UI.scope() == 'group')
+prefs.set_scope = 'bogus'
+UI.loadPrefs()
+check('unknown scope falls back to all', UI.scope() == 'all')
+UI.setScope('all')
 
 -- ── mini meter rows: merged, scoped, cached per snapshot/mode/scope ──
 UI.setRoster({ 'Healbot' })

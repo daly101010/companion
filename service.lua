@@ -28,12 +28,14 @@ local M = { UI = UI, enabled = false, error = nil }
 
 local db = nil
 local blackbox = nil
+local readers = nil -- black-box TLO readers; .raid() is polled by tick for the raid scope
 local playerName, server = 'You', 'unknown'
 local sessionStart = 0
 local fightsThisSession = 0
 local needRefresh = true
 local lastRefresh, lastXp, lastPrune, lastBcast, lastPrefs = 0, 0, 0, 0, 0
 local pruneMore = false -- a prune slice reported leftover work
+local lastRaid = 0
 local lastZone = ''
 
 local function tlo(fn, default)
@@ -86,7 +88,8 @@ function M.init()
     db:startSession(server, playerName)
 
     -- always-on flight recorder (2 Hz, last 90 s) frozen onto the fight on death
-    blackbox = BlackBox.new(BlackBox.tloReaders(), { hz = 2, seconds = 90 })
+    readers  = BlackBox.tloReaders()
+    blackbox = BlackBox.new(readers, { hz = 2, seconds = 90 })
 
     Combat.init({
         playerName   = function() return playerName end,
@@ -169,6 +172,10 @@ function M.tick()
     end
 
     local t = mq.gettime()
+    if (t - lastRaid) > 5000 then
+        UI.setRaidRoster(readers.raid())
+        lastRaid = t
+    end
     if (t - lastBcast) > 1000 then
         broadcastDps()
         lastBcast = t

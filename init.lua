@@ -58,7 +58,8 @@ local fightsThisSession = 0
 local needRefresh       = true
 
 -- always-on flight recorder (2 Hz, last 90 s) frozen onto the fight on death
-local blackbox = BlackBox.new(BlackBox.tloReaders(), { hz = 2, seconds = 90 })
+local readers  = BlackBox.tloReaders()
+local blackbox = BlackBox.new(readers, { hz = 2, seconds = 90 })
 
 Combat.init({
     playerName   = function() return playerName end,
@@ -199,6 +200,7 @@ printf('\ag[companion]\ax started for \ay%s\ax on \ay%s\ax. /companion to toggle
 -- ── main loop ──────────────────────────────────────────────────────────
 local lastRefresh, lastXp, lastPrune, lastBcast, lastPrefs = 0, 0, 0, 0, 0
 local pruneMore = false -- a prune slice reported leftover work
+local lastRaid = 0
 local lastZone = tlo(function() return mq.TLO.Zone.ShortName() end, '')
 
 -- one XP snapshot at login so the trend has an anchor
@@ -227,6 +229,10 @@ while running and mq.TLO.MacroQuest.GameState() == 'INGAME' do
     end
 
     local t = mq.gettime()
+    if (t - lastRaid) > 5000 then -- raid roster for the meter's raid scope
+        UI.setRaidRoster(readers.raid())
+        lastRaid = t
+    end
     if (t - lastBcast) > 1000 then -- share my DPS with the group ~1 Hz
         broadcastDps()
         lastBcast = t

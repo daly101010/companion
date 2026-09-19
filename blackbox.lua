@@ -241,7 +241,19 @@ function M.tloReaders()
         end
         return out
     end
-    return { me = me, group = group, buffNames = buffNames }
+    -- Raid roster (names only). Not part of the 2 Hz sample: 54 TLO reads per
+    -- tick is waste for a list that changes every few minutes. The main loops
+    -- poll it every few seconds for the meter's raid scope (UI.setRaidRoster).
+    local function raid()
+        local out = {}
+        local n = num(function() return mq.TLO.Raid.Members() end) or 0
+        for i = 1, n do
+            local name = tlo(function() return mq.TLO.Raid.Member(i).Name() end, nil)
+            if name and name ~= '' then out[#out + 1] = name end
+        end
+        return out
+    end
+    return { me = me, group = group, buffNames = buffNames, raid = raid }
 end
 
 return M

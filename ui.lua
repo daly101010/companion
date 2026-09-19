@@ -46,8 +46,9 @@ local S     = {
     mini        = false, -- compact meter mode (just the current fight's DPS)
     miniMode    = 'dps', -- mini meter: 'dps' | 'hps'
     miniPie     = true,  -- mini meter: draw the damage-share pie under the bars
-    settings    = { timeout = 12, retentionDays = 14, share = true, miniRows = 12, groupOnly = false },
+    settings    = { timeout = 12, retentionDays = 14, share = true, miniRows = 12, scope = 'all' },
     roster      = {},  -- lowercased names of my current group members (set by the main loop)
+    raid        = {},  -- lowercased names of my current raid members (set by the main loop, ~5s)
     hist        = { fights = {}, best = nil, sessions = {}, xp = {}, session = nil },
     lastRefresh = 0,
 }
@@ -254,11 +255,13 @@ local function sourcesFromAbilities(abils, duration)
     return arr
 end
 
--- ── meter scope (all vs. group only) ───────────────────────────────────
--- In a raid the meter fills with 50+ strangers; "group only" keeps just me,
--- my group members (roster from the black-box sampler), companion peers (my
--- boxes, by definition) and any of those players' pets. Pets normalize to
--- "<Owner>`s pet" in combat.lua, so ownership is read straight off the name.
+-- ── meter scope (all | group | raid) ──────────────────────────────────
+-- In a raid the meter fills with mobs, strangers' pets and stray players;
+-- "group" keeps just me, my group members (roster from the black-box
+-- sampler), companion peers (my boxes, by definition) and any of those
+-- players' pets; "raid" widens the roster to every raid member (polled by the
+-- main loop). Pets normalize to "<Owner>`s pet" in combat.lua, so ownership
+-- is read straight off the name.
 local function petOwner(name)
     return tostring(name or ''):match("^(.-)[`']s %a+$")
 end
@@ -273,41 +276,64 @@ local function peerSet()
     return set
 end
 
--- Does this meter row belong to my group? row = { name, mine?, peer? }.
--- `peers` is a peerSet() (built by the caller; made here when omitted).
--- Exposed as UI.inGroupScope for the test.
-local function inGroupScope(row, peers)
-    if row.mine or row.peer then return true end
+-- Is a lowercased player name inside the current scope's roster?
+local function inRoster(name, scope)
+    if S.roster[name] then return true end
+    return scope == 'raid' and S.raid[name] == true
+end
+
+-- Does this meter row belong to the scope? row = { name, mine?, peer? }.
+-- `scope` defaults to the setting; `peers` is a peerSet() (built by the
+-- caller; made here when omitted). Exposed as UI.inGroupScope for the test.
+local function inScope(row, scope, peers)
+    scope = scope or S.settings.scope
+    if scope == 'all' or row.mine or row.peer then return true end
     local name = tostring(row.name or ''):lower()
     local me = tostring(S.playerName or ''):lower()
-    if name == me or name == 'you' or S.roster[name] then return true end
+    if name == me or name == 'you' or inRoster(name, scope) then return true end
     local owner = petOwner(row.name)
     if owner then
         owner = owner:lower()
-        if owner == me or S.roster[owner] then return true end
+        if owner == me or inRoster(owner, scope) then return true end
         if (peers or peerSet())[owner] then return true end
     end
     return false
 end
 
--- Apply the meter scope to an array of rows (returns the same array when off).
+-- Apply the meter scope to an array of rows (returns the same array when 'all').
 local function scopeRows(rows)
-    if not S.settings.groupOnly then return rows end
+    local scope = S.settings.scope
+    if scope == 'all' then return rows end
     local peers = peerSet()
     local out = {}
-    for _, r in ipairs(rows) do if inGroupScope(r, peers) then out[#out + 1] = r end end
+    for _, r in ipairs(rows) do if inScope(r, scope, peers) then out[#out + 1] = r end end
     return out
 end
 
--- Clickable "all | group" scope switch, drawn on the current line.
+local SCOPE_TIPS = {
+    all   = 'Show every damage source',
+    group = 'Only me, my group members, my boxes and our pets',
+    raid  = 'Only raid members, my boxes and their pets (no mobs, no strangers)',
+}
+
+-- Clickable "all | group | raid" scope switch, drawn on the current line.
 local function scopeToggle(gap)
-    local g = S.settings.groupOnly
-    ImGui.SameLine(0, gap or 8); ctext(g and 'fgFaint' or 'gold', 'all')
-    if ImGui.IsItemClicked(0) then S.settings.groupOnly = false end
-    if ImGui.IsItemHovered() then ImGui.SetTooltip('Show every damage source') end
-    ImGui.SameLine(0, 6); ctext(g and 'you' or 'fgFaint', 'group')
-    if ImGui.IsItemClicked(0) then S.settings.groupOnly = true end
-    if ImGui.IsItemHovered() then ImGui.SetTooltip('Only me, my group members, my boxes and our pets (raids)') end
+    local cur = S.settings.scope
+    local first = true
+    for _, sc in ipairs({ 'all', 'group', 'raid' }) do
+        ImGui.SameLine(0, first and (gap or 8) or 6); first = false
+        ctext(cur == sc and (sc == 'all' and 'gold' or 'you') or 'fgFaint', sc)
+        if ImGui.IsItemClicked(0) then S.settings.scope = sc end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip(SCOPE_TIPS[sc]) end
+    end
+end
+
+-- "nothing yet" placeholder that names the active scope.
+local function scopeEmptyText(hps)
+    local sc = S.settings.scope
+    if sc == 'group' then return 'nothing from your group yet' end
+    if sc == 'raid' then return 'nothing from your raid yet' end
+    return hps and 'no healing yet' or 'no damage yet'
 end
 
 -- ── damage-share pie ───────────────────────────────────────────────────
@@ -947,7 +973,7 @@ local function drawLive()
         -- damage by source (click a row to drive the breakdown + timeline)
         ImGui.BeginChild('cmp_src', 0, 150, true)
         local outTotal = snap.total
-        if S.settings.groupOnly then
+        if S.settings.scope ~= 'all' then
             outTotal = 0
             for _, s in ipairs(sources) do outTotal = outTotal + (s.total or 0) end
         end
@@ -963,7 +989,7 @@ local function drawLive()
         local slices = pieSlices(sources, 8)
         cardHeader('Damage share', #slices > 0 and (#sources .. ' sources') or nil)
         if #slices == 0 then
-            ctext('fgFaint', S.settings.groupOnly and 'nothing from your group yet' or 'no damage yet')
+            ctext('fgFaint', scopeEmptyText(false))
         else
             drawPie(slices, 46, ImGui.GetContentRegionAvail())
         end
@@ -1879,10 +1905,14 @@ local function drawSettings()
     ctext('fgFaint', 'Broadcast your damage/healing so boxes merge into one group meter.')
     ImGui.Dummy(0, 4)
 
-    local go, ch5 = ImGui.Checkbox('Group only (raid filter)', st.groupOnly)
-    if ch5 then st.groupOnly = go end
-    ctext('fgFaint', 'Meters show only you, your group members, your companion boxes and their pets.')
-    ctext('fgFaint', 'Same switch as the all | group toggle on the mini meter and source cards.')
+    label('Meter scope')
+    for i, sc in ipairs({ 'all', 'group', 'raid' }) do
+        if i > 1 then ImGui.SameLine(0, 12) end
+        if ImGui.RadioButton(sc .. '##scope', st.scope == sc) then st.scope = sc end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip(SCOPE_TIPS[sc]) end
+    end
+    ctext('fgFaint', 'group: you, your group members, your companion boxes and their pets.')
+    ctext('fgFaint', 'raid: every raid member plus your boxes and their pets. Same switch as the all | group | raid toggle on the meters.')
     ImGui.Separator()
 
     if ImGui.Button('Reset window position/size') then
@@ -1928,11 +1958,27 @@ function UI.setRoster(members)
     S.roster = set
 end
 
+-- Cache my current raid roster (names, or { name = ... } rows) for the raid
+-- scope. Called from the main loop every few seconds; nil leaves it as is.
+---@param members table|nil
+function UI.setRaidRoster(members)
+    if type(members) ~= 'table' then return end
+    local set = {}
+    for _, m in ipairs(members) do
+        local n = type(m) == 'table' and m.name or m
+        if n and n ~= '' then set[tostring(n):lower()] = true end
+    end
+    S.raid = set
+end
+
 -- Test hooks for the meter scope (see tests/test_meter_scope.lua).
-function UI.inGroupScope(row) return inGroupScope(row) end
+function UI.inGroupScope(row) return inScope(row, 'group') end
+function UI.inScope(row, scope) return inScope(row, scope) end
 function UI.pieSlices(rows, maxSlices) return pieSlices(rows, maxSlices) end
-function UI.setGroupOnly(v) S.settings.groupOnly = v and true or false end
-function UI.groupOnly() return S.settings.groupOnly end
+function UI.setGroupOnly(v) S.settings.scope = v and 'group' or 'all' end
+function UI.groupOnly() return S.settings.scope == 'group' end
+function UI.setScope(sc) S.settings.scope = sc end
+function UI.scope() return S.settings.scope end
 
 -- The four history queries are nowhere near equally cheap. recentFights is a
 -- 60-row walk down idx_fight_session; the two aggregates GROUP BY the whole
@@ -2058,7 +2104,9 @@ function UI.loadPrefs()
     if p.set_retention then st.retentionDays = tonumber(p.set_retention) or st.retentionDays end
     if p.set_minirows then st.miniRows = tonumber(p.set_minirows) or st.miniRows end
     if p.set_share then st.share = (p.set_share == '1') end
-    if p.set_grouponly then st.groupOnly = (p.set_grouponly == '1') end
+    if p.set_scope then st.scope = p.set_scope
+    elseif p.set_grouponly == '1' then st.scope = 'group' end -- pre-raid-scope pref
+    if st.scope ~= 'group' and st.scope ~= 'raid' then st.scope = 'all' end
     if S.combat then S.combat.timeoutSec = st.timeout end
     if S.group and S.group.setEnabled then S.group.setEnabled(st.share) end
     if p.fight_sort then
@@ -2094,13 +2142,13 @@ function UI.savePrefs()
     if pv ~= S._savedMiniPie then S.db:setPref('mini_pie', pv); S._savedMiniPie = pv end
     -- settings (only write on change)
     local st = S.settings
-    local sig = table.concat({ st.timeout, st.retentionDays, st.miniRows, st.share and 1 or 0, st.groupOnly and 1 or 0 }, ',')
+    local sig = table.concat({ st.timeout, st.retentionDays, st.miniRows, st.share and 1 or 0, st.scope }, ',')
     if sig ~= S._savedSettings then
         S.db:setPref('set_timeout', st.timeout)
         S.db:setPref('set_retention', st.retentionDays)
         S.db:setPref('set_minirows', st.miniRows)
         S.db:setPref('set_share', st.share and '1' or '0')
-        S.db:setPref('set_grouponly', st.groupOnly and '1' or '0')
+        S.db:setPref('set_scope', st.scope)
         S._savedSettings = sig
     end
 end
@@ -2119,7 +2167,7 @@ function UI.retentionDays() return S.settings.retentionDays or 14 end
 local miniCache = { rows = nil, snap = nil, hps = nil, scope = nil, t = -math.huge }
 local function miniRows(snap, hps)
     local cache = miniCache
-    local scope = S.settings.groupOnly
+    local scope = S.settings.scope
     local nowMs = mq.gettime()
     if cache.rows and cache.snap == snap and cache.hps == hps and cache.scope == scope
         and (nowMs - cache.t) < 500 then
@@ -2209,8 +2257,7 @@ local function drawMini()
             for _, r in ipairs(rows) do grand = grand + r.total end
             grand = grand > 0 and grand or 1
             if #rows == 0 then
-                ctext('fgFaint', S.settings.groupOnly and 'nothing from your group yet'
-                    or (hps and 'no healing yet' or 'no damage yet'))
+                ctext('fgFaint', scopeEmptyText(hps))
             end
             local maxRows = S.settings.miniRows or 12
             for i, s in ipairs(rows) do
