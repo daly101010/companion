@@ -17,6 +17,7 @@ G.enabled         = false -- actors available AND user hasn't disabled sharing
 G.on              = true  -- user setting
 
 G.onPeerEvent     = nil   -- fn(payload) set by the host: a peer's first-person event arrived
+G.onPeerDeath     = nil   -- fn(payload) set by the host: a non-recording peer died (samples + events)
 
 -- Is `name` a fresh companion peer, or a fresh peer's pet ("<Peer>`s pet")?
 -- The recorder drops its own third-person parse of such sources and takes the
@@ -76,7 +77,12 @@ function G.init(playerName)
     end
     G.actor = actors.register(MAILBOX, function(message)
         local c = message()
-        if type(c) ~= 'table' or c.id ~= 'dps' then return end
+        if type(c) ~= 'table' then return end
+        if c.id == 'death' then -- a non-recording box died: hand it to the recorder ingest
+            if c.sender ~= G.me and G.on and G.onPeerDeath then pcall(G.onPeerDeath, c) end
+            return
+        end
+        if c.id ~= 'dps' then return end
         local who = c.player
         if not who or who == G.me then return end -- ignore our own broadcast
         G.peers[who] = {
@@ -139,6 +145,15 @@ function G.broadcast(s)
     s.id = 'dps'
     s.player = G.me
     pcall(function() fan_out(G.actor, MAILBOX, G.HOST_SCRIPTS, s) end)
+end
+
+-- Send my death (combat.deathPayload shape) to every host script's dps
+-- mailbox; recorders ingest it (Combat.ingestPeerDeath). One-off per death.
+function G.broadcastDeath(payload)
+    if not G.enabled or not G.actor or not G.on or type(payload) ~= 'table' then return end
+    payload.id = 'death'
+    payload.sender = G.me
+    pcall(function() fan_out(G.actor, MAILBOX, G.HOST_SCRIPTS, payload) end)
 end
 
 -- Peers seen within `maxAgeMs` (default 6s), so members who stopped fighting or

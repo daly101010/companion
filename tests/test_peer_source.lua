@@ -49,5 +49,27 @@ check('nil is not', G.isFreshPeerSource(nil) == false)
 now = now + 7000
 check('stale peer is not a peer source', G.isFreshPeerSource('Bob') == false)
 
+-- ── deaths: broadcast + receiver routing ──
+local sentDeaths = {}
+package.loaded['actors'] = nil
+G.actor = { send = function(_, address, payload)
+  if payload.id == 'death' then sentDeaths[#sentDeaths + 1] = { script = address.script, payload = payload } end
+end }
+G.broadcastDeath({ killer = 'a rat', samples = {}, events = {} })
+check('death fans out to every host script', #sentDeaths == #G.HOST_SCRIPTS, #sentDeaths)
+check('death payload stamped with id + sender', sentDeaths[1].payload.id == 'death' and sentDeaths[1].payload.sender == 'Calbuss')
+
+local deaths = {}
+G.onPeerDeath = function(p) deaths[#deaths + 1] = p end
+deliver('companion_dps', { id = 'death', sender = 'Bob', killer = 'a rat' })
+check('peer death handed to onPeerDeath', #deaths == 1 and deaths[1].sender == 'Bob')
+deliver('companion_dps', { id = 'death', sender = 'Calbuss', killer = 'a rat' })
+check('own death echo dropped', #deaths == 1)
+check('death payload never becomes a dps peer', G.peers['Bob'] ~= nil and G.peers['Calbuss'] == nil)
+G.setEnabled(false)
+deliver('companion_dps', { id = 'death', sender = 'Bob', killer = 'a rat' })
+check('sharing off drops peer deaths', #deaths == 1)
+G.setEnabled(true)
+
 io.write(string.format('\n%d passed, %d failed\n', pass, fail))
 os.exit(fail == 0 and 0 or 1)

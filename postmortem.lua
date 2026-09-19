@@ -375,7 +375,7 @@ end
 function M.stamp(fight, playerName)
     for _, d in ipairs(fight.deaths_detail or {}) do
         local ok, v = pcall(M.analyze, { samples = d.samples, events = fight.events, deathT = d.t,
-            playerName = playerName, killer = d.killer })
+            playerName = d.player or playerName, killer = d.killer }) -- d.player: a peer's death (recorder)
         if ok and v then
             d.cause = v.cause
             d.narrative = table.concat(v.narrative or {}, ' ')

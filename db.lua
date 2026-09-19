@@ -205,6 +205,7 @@ function DB.new(path)
     self:_ensureColumn('fight', 'sh_casts',     'INTEGER')
     self:_ensureColumn('fight', 'sh_summary',   'TEXT')
     self:_ensureColumn('fight', 'killed',       'INTEGER NOT NULL DEFAULT 0') -- primary target slain
+    self:_ensureColumn('death', 'character',    'TEXT') -- NULL = the session's own character; else a peer's death
     self:_ensureColumn('fight', 'mob_min_hp',   'REAL')                       -- lowest target HP% seen
     self:_ensureKindIndex()
     return self
@@ -490,11 +491,11 @@ function DB:saveFight(fight)
     local okDeaths, deathErr = pcall(function()
         for _, d in ipairs(fight.deaths_detail or {}) do
             local ds = self:_prepare([[
-                INSERT INTO death(fight_id, t, killer, cause, narrative, hp_curve) VALUES(?,?,?,?,?,?);
+                INSERT INTO death(fight_id, t, killer, cause, narrative, hp_curve, character) VALUES(?,?,?,?,?,?,?);
             ]])
             if ds then
                 ds:bind(1, fightId); ds:bind(2, d.t or 0); ds:bind(3, d.killer)
-                ds:bind(4, d.cause); ds:bind(5, d.narrative); ds:bind(6, d.hp_curve)
+                ds:bind(4, d.cause); ds:bind(5, d.narrative); ds:bind(6, d.hp_curve); ds:bind(7, d.player)
                 ds:step(); ds:finalize()
                 local deathId = self._db:last_insert_rowid()
                 local ss = self:_prepare([[
@@ -852,13 +853,13 @@ end
 ---@param limit integer
 function DB:recentDeaths(limit)
     local stmt = self:_prepare([[
-        SELECT d.id AS death_id, d.fight_id AS fight_id, d.t AS t, d.killer AS killer, d.cause AS cause,
+        SELECT d.id AS death_id, d.fight_id AS fight_id, d.t AS t, d.killer AS killer, d.cause AS cause, d.character AS character,
                f.primary_target AS mob, f.zone AS zone, f.started_at AS started_at, f.duration AS duration,
                f.sh_min_hp AS sh_min_hp, f.sh_emerg_sec AS sh_emerg_sec, f.sh_casts AS sh_casts, f.sh_summary AS sh_summary
         FROM death d JOIN fight f ON f.id = d.fight_id
         WHERE f.session_id IN ]] .. CHAR_SESSIONS .. [[
         UNION ALL
-        SELECT NULL AS death_id, e.fight_id AS fight_id, e.t AS t, e.source AS killer, NULL AS cause,
+        SELECT NULL AS death_id, e.fight_id AS fight_id, e.t AS t, e.source AS killer, NULL AS cause, NULL AS character,
                f.primary_target AS mob, f.zone AS zone, f.started_at AS started_at, f.duration AS duration,
                f.sh_min_hp AS sh_min_hp, f.sh_emerg_sec AS sh_emerg_sec, f.sh_casts AS sh_casts, f.sh_summary AS sh_summary
         FROM event e JOIN fight f ON f.id = e.fight_id
@@ -877,7 +878,7 @@ end
 ---@param deathId integer
 ---@return table|nil { row, samples }
 function DB:deathDetail(deathId)
-    local stmt = self:_prepare("SELECT id, fight_id, t, killer, cause, narrative, hp_curve FROM death WHERE id=?;")
+    local stmt = self:_prepare("SELECT id, fight_id, t, killer, cause, narrative, hp_curve, character FROM death WHERE id=?;")
     if not stmt then return nil end
     stmt:bind(1, deathId)
     local row = collectRows(stmt)[1]

@@ -128,11 +128,15 @@ function M.init()
             needRefresh = true
         end,
         isPeerSource = function(name) return Group.isFreshPeerSource(name) end,
+        -- my death on a box that does not record: ship samples + last 60s of
+        -- incoming/heals to the recorder so the post-mortem is not lost
+        onDeath      = function(payload) if not UI.recording() then Group.broadcastDeath(payload) end end,
     })
 
     Group.init(playerName)
     Combat.setEventHook(function(ev) Group.broadcastEvent(ev) end)
     Group.onPeerEvent = function(payload) Combat.ingestPeerEvent(payload) end
+    Group.onPeerDeath = function(payload) if UI.recording() then Combat.ingestPeerDeath(payload) end end
     UI.setup({ combat = Combat, db = db, playerName = playerName, group = Group })
     UI.loadPrefs()
     if UI.recording() then db:startSession(server, playerName) end

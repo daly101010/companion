@@ -1867,6 +1867,9 @@ local function drawDeaths()
                 ImGuiSelectableFlags.SpanAllColumns)
             if pressed then S.pendingDeath = d end
             ImGui.TableNextColumn(); ctext('fgDim', (d.zone and d.zone ~= '') and d.zone or '?')
+            if d.character and d.character ~= S.playerName then
+                ImGui.SameLine(0, 6); ctext('you', d.character) -- a box's death recorded here
+            end
             ImGui.TableNextColumn(); ctext('enemy', (d.killer and d.killer ~= '?') and d.killer or 'unknown')
             ImGui.TableNextColumn()
             if d.cause then ctext(CAUSE_COLOR[d.cause] or 'fgFaint', Postmortem.CAUSE_LABEL[d.cause] or d.cause)
@@ -2242,7 +2245,7 @@ function UI.refreshHistory(sessionMeta, force)
         local verdict = nil
         if detail then
             local ok, v = pcall(Postmortem.analyze, { samples = detail.samples, events = events, deathT = d.t,
-                playerName = S.playerName, killer = d.killer, window = 60 })
+                playerName = d.character or S.playerName, killer = d.killer, window = 60 }) -- character: a peer's death
             if ok then verdict = v else printf('\ar[companion]\ax post-mortem failed: %s', tostring(v)) end
         end
         -- pruned events leave the analyzer with nothing to work from, which
@@ -2259,7 +2262,7 @@ function UI.refreshHistory(sessionMeta, force)
     if S.exportRequest then
         S.exportRequest = false
         if S.selDeath and S.selDeath.verdict then
-            Export.runDeath(S.selDeath.verdict, S.selDeath.row, S.playerName)
+            Export.runDeath(S.selDeath.verdict, S.selDeath.row, S.selDeath.row.character or S.playerName)
         else
             printf('\ay[companion]\ax no post-mortem to export (select a death recorded with state samples).')
         end

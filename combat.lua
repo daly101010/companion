@@ -625,7 +625,7 @@ local function finalize()
     -- pure-cast encounters (buffing between pulls: no damage either way, no
     -- deaths) stay visible as `last` but are not persisted or folded into Overall
     if fight.total_dmg == 0 and fight.incoming == 0 and fight.deaths == 0
-        and fight.heal_total == 0 then
+        and fight.heal_total == 0 and #(fight.deaths_detail or {}) == 0 then -- a peer's death alone still persists
         return
     end
     mergeIntoOverall(enc)
@@ -735,8 +735,67 @@ function M.recordDeath(killer)
     samples[#samples + 1] = { t = 0, hp = 0, flags = lastS and lastS.flags or '', group = lastS and lastS.group or {},
         tank = lastS and lastS.tank or nil, aggro = lastS and lastS.aggro or nil, aggro2Name = lastS and lastS.aggro2Name or nil,
         tot = lastS and lastS.tot or nil, buffsDropped = {}, terminal = true }
-    enc.deathRecords[#enc.deathRecords + 1] = { t = relT, killer = killer or '?', samples = samples,
-        eventIndex = eventIndex }
+    local rec = { t = relT, killer = killer or '?', samples = samples, eventIndex = eventIndex }
+    enc.deathRecords[#enc.deathRecords + 1] = rec
+    -- a box that does not record hands its death to the recorder (init/service
+    -- decide; see M.deathPayload / M.ingestPeerDeath)
+    if cb.onDeath then pcall(cb.onDeath, M.deathPayload(rec, enc)) end
+    return true
+end
+
+-- ── peer deaths ───────────────────────────────────────────────────────
+-- Payload for a death on THIS box: the frozen black-box samples plus every
+-- event that targeted me in the last `window` s (incoming + heals received),
+-- both with t relative to the death (<= 0) so the recorder can re-base them
+-- onto its own fight clock. Everything the post-mortem analyzer needs.
+M.DEATH_WINDOW = 60
+function M.deathPayload(rec, enc)
+    local me = cb.playerName()
+    local events = {}
+    for _, e in ipairs(enc.events) do
+        local dt = (e.t or 0) - rec.t
+        if e.target == me and e.kind ~= 'death' and dt >= -M.DEATH_WINDOW and dt <= 0 then
+            events[#events + 1] = { t = dt, source = e.source, target = e.target, ability = e.ability,
+                kind = e.kind, amount = e.amount, crit = e.crit, outcome = e.outcome }
+        end
+    end
+    return { id = 'death', sender = me, at = os.time(), killer = rec.killer, samples = rec.samples, events = events }
+end
+
+-- A peer's death (group.lua:onPeerDeath): its incoming/heal events are
+-- appended to the recorder's fight (re-based to now) and a death record
+-- tagged with the peer's name is added, so Postmortem.stamp analyzes it as
+-- that player and saveFight stores it under death.character. It refreshes
+-- or opens the recorder's fight like any other line; it is not MY death,
+-- so enc.deaths is untouched.
+---@param p table  M.deathPayload shape
+---@return boolean ingested
+function M.ingestPeerDeath(p)
+    if type(p) ~= 'table' or p.id ~= 'death' or not p.sender or p.sender == cb.playerName() then return false end
+    local enc = ensureActive()
+    if #enc.events == 0 then
+        -- the death opened this fight: start it where the peer's window starts
+        -- so its events keep their spacing (nothing else is on the clock yet)
+        local earliest = 0
+        for _, e in ipairs(p.events or {}) do earliest = math.min(earliest, tonumber(e.t) or 0) end
+        enc.startClock = enc.startClock + earliest
+        enc.startTime = enc.startTime + math.floor(earliest)
+    end
+    local relT = now() - enc.startClock
+    for _, e in ipairs(p.events or {}) do
+        if #enc.events >= M.maxEvents then break end
+        -- events older than my fight (peer's window predates my first line) sit at 0
+        enc.events[#enc.events + 1] = { t = math.max(0, relT + (tonumber(e.t) or 0)), source = e.source, target = e.target,
+            ability = e.ability, kind = e.kind, amount = tonumber(e.amount) or 0, crit = e.crit == true, outcome = e.outcome }
+    end
+    local eventIndex = nil
+    if #enc.events < M.maxEvents then
+        enc.events[#enc.events + 1] = { t = relT, source = p.killer or '?', target = p.sender,
+            ability = 'Death', kind = 'death', amount = 0, crit = false, outcome = 'death' }
+        eventIndex = #enc.events
+    end
+    enc.deathRecords[#enc.deathRecords + 1] = { t = relT, killer = p.killer or '?', samples = p.samples or {},
+        eventIndex = eventIndex, player = p.sender }
     return true
 end
 
@@ -984,7 +1043,7 @@ function M.unregisterEvents()
 end
 
 -- ── public API ─────────────────────────────────────────────────────────
----@param opts table  { onFinalize, getPet, getZone, isRaidTarget, playerName, getMaster, getWeapons, spellDuration, getTarget, getTargetPct, freezeBlackBox, isPeerSource }
+---@param opts table  { onFinalize, getPet, getZone, isRaidTarget, playerName, getMaster, getWeapons, spellDuration, getTarget, getTargetPct, freezeBlackBox, isPeerSource, onDeath }
 function M.init(opts)
     opts = opts or {}
     for k, v in pairs(opts) do cb[k] = v end

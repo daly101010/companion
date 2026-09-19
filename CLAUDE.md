@@ -175,6 +175,16 @@ Every box used to parse and persist the same fight. Two switches change that:
   view is the same everywhere); the recorder's DB thus holds every box's
   per-ability rows. Tests: `luajit tests/test_peer_ingest.lua`,
   `tests/test_peer_source.lua`.
+- **peer deaths** (`Combat.deathPayload` -> `cb.onDeath` -> `Group.broadcastDeath`
+  on the dps mailbox, only when NOT recording; recorders take it through
+  `Group.onPeerDeath` -> `Combat.ingestPeerDeath`): the frozen black-box
+  samples plus every event that targeted the dying box in the last 60 s
+  (t relative to the death) are re-based onto the recorder's fight clock and
+  appended to its fight, with a death record tagged `player = <sender>`.
+  `Postmortem.stamp` analyzes that record as the peer, `saveFight` stores it
+  with `death.character` (NULL = own death), the Deaths tab shows the name
+  beside the zone, and re-analysis/export use `d.character`. `enc.deaths`
+  (my deaths) is untouched. Test: `luajit tests/test_peer_death.lua`.
 
 ## Settings (Settings tab)
 
