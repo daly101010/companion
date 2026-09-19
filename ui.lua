@@ -696,13 +696,30 @@ local TL_MAX_LANES = 40 -- safety bound for pathological fights
 
 -- Count the lanes a timeline would draw for a source (same rules as
 -- drawTimeline), so the enclosing card can auto-fit its height.
+-- The events of one source, cached ON the snapshot table. A live snapshot is
+-- rebuilt every ~180ms (combat.lua snapCache) and a history selection never
+-- changes, so both stay correct; it saves the timeline (lanes + ticks) and
+-- the lane count walking every event of the fight on every frame.
+local function sourceEvents(snap, source)
+    local cache = snap._evBySrc
+    if not cache then cache = {}; snap._evBySrc = cache end
+    local evs = cache[source]
+    if evs then return evs end
+    evs = {}
+    for _, e in ipairs(snap.events or {}) do
+        if e.source == source then evs[#evs + 1] = e end
+    end
+    cache[source] = evs
+    return evs
+end
+
 local function timelineLaneCount(snap, source, abilities)
     local seen, n = {}, 0
     for _, a in ipairs(abilities or {}) do
         if n >= TL_MAX_LANES then return n end
         if not seen[a.ability] and tlAllowed(a.kind, nil) then seen[a.ability] = true; n = n + 1 end
     end
-    for _, e in ipairs(snap.events or {}) do
+    for _, e in ipairs(sourceEvents(snap, source)) do
         if n >= TL_MAX_LANES then return n end
         if e.source == source and e.outcome == 'cast' and e.ability
             and not seen[e.ability] and tlAllowed(e.kind, e.outcome) then
@@ -735,7 +752,8 @@ local function drawTimeline(snap, _h, source, abilities)
             laneOf[a.ability] = #lanes
         end
     end
-    for _, e in ipairs(snap.events or {}) do
+    local evs = sourceEvents(snap, source)
+    for _, e in ipairs(evs) do
         if #lanes >= TL_MAX_LANES then break end
         if e.source == source and e.outcome == 'cast' and e.ability
             and not laneOf[e.ability] and tlAllowed(e.kind, e.outcome) then
@@ -790,8 +808,8 @@ local function drawTimeline(snap, _h, source, abilities)
     end
 
     -- ticks (dim lanes other than the highlighted one, when one is set)
-    for _, e in ipairs(snap.events) do
-        local li = e.source == source and laneOf[e.ability]
+    for _, e in ipairs(evs) do
+        local li = laneOf[e.ability]
         if li and not tlAllowed(e.kind, e.outcome) then li = nil end
         if li then
             local dim = hi and lanes[li].name ~= hi
@@ -1139,6 +1157,61 @@ local function drawSmarthealRow(f)
     return true
 end
 
+-- ── history detail caches ──────────────────────────────────────────────
+-- A selected fight's events never change, but the detail panel used to
+-- re-aggregate them every frame: the source list (+ incoming attackers), the
+-- selected source's ability rows, kind series, encounter/active totals and
+-- the timeline's event walk. Both caches live on S.sel, so a new selection
+-- (a fresh table from refreshHistory) invalidates them for free.
+
+-- Sources of a selected fight: ability rollups + mobs that hit me (event-derived).
+local function histSources(sel)
+    if sel._srcs then return sel._srcs end
+    local dur = sel.fight.duration or 1
+    local srcs = sourcesFromAbilities(sel.abilities, dur)
+    local named = {}
+    for _, s in ipairs(srcs) do named[s.name] = true end
+    local inAgg = {}
+    for _, e in ipairs(sel.events or {}) do
+        if e.target == S.playerName and (e.amount or 0) > 0 and e.source and not named[e.source] then
+            inAgg[e.source] = (inAgg[e.source] or 0) + e.amount
+        end
+    end
+    for name, total in pairs(inAgg) do
+        srcs[#srcs + 1] = { name = name, total = total, dps = total / dur, incoming = true }
+    end
+    table.sort(srcs, function(x, y) return x.total > y.total end)
+    sel._srcs = srcs
+    return srcs
+end
+
+-- Per-source derived data of a selected fight: { events, abils, kind, stot, asec }.
+local function histDerived(sel, source)
+    sel._d = sel._d or {}
+    local d = sel._d[source]
+    if d then return d end
+    local mine, stot, abkt = {}, 0, {}
+    for _, e in ipairs(sel.events or {}) do
+        if e.source == source then
+            mine[#mine + 1] = e
+            if (e.amount or 0) > 0 and (e.outcome == 'hit' or e.outcome == nil) then
+                stot = stot + e.amount; abkt[math.floor(e.t or 0)] = true
+            end
+        end
+    end
+    local asec = 0
+    for _ in pairs(abkt) do asec = asec + 1 end
+    local abils = {}
+    for _, a in ipairs(sel.abilities or {}) do
+        if a.source == source then abils[#abils + 1] = a end
+    end
+    table.sort(abils, function(x, y) return (x.total or 0) > (y.total or 0) end)
+    if #abils == 0 then abils = abilitiesFromEvents(mine, source) end
+    d = { events = mine, abils = abils, kind = eventsToKindSeries(mine, source), stot = stot, asec = asec }
+    sel._d[source] = d
+    return d
+end
+
 -- ── zone runs (History > By Zone) ──────────────────────────────────────
 local function zoneLabel(zone) return (zone and zone ~= '') and zone or 'no zone' end
 
@@ -1427,22 +1500,7 @@ local function drawHistory()
         elseif S.sel and S.sel.fight then
             local f = S.sel.fight
             local dur = f.duration or 1
-            local srcs = sourcesFromAbilities(S.sel.abilities, dur)
-            local named = {}
-            for _, s in ipairs(srcs) do named[s.name] = true end
-            -- append incoming attackers (mobs) from the event log: events that
-            -- targeted YOU whose source has no outgoing ability rows
-            local inAgg = {}
-            for _, e in ipairs(S.sel.events or {}) do
-                if e.target == S.playerName and (e.amount or 0) > 0
-                    and e.source and not named[e.source] then
-                    inAgg[e.source] = (inAgg[e.source] or 0) + e.amount
-                end
-            end
-            for name, total in pairs(inAgg) do
-                srcs[#srcs + 1] = { name = name, total = total, dps = total / dur, incoming = true }
-            end
-            table.sort(srcs, function(x, y) return x.total > y.total end)
+            local srcs = histSources(S.sel) -- ability rollups + mobs that hit me, cached
             local function has(nm)
                 for _, s in ipairs(srcs) do if s.name == nm then return true end end
                 return false
@@ -1461,37 +1519,29 @@ local function drawHistory()
             if clicked then S.histSource = clicked end
             ImGui.Separator()
 
-            -- ability rows: fight_ability for players/pets, event-derived for mobs
-            local abils = {}
-            for _, a in ipairs(S.sel.abilities) do
-                if a.source == hsel then abils[#abils + 1] = a end
-            end
-            table.sort(abils, function(x, y) return (x.total or 0) > (y.total or 0) end)
-            if #abils == 0 then abils = abilitiesFromEvents(S.sel.events, hsel) end
+            -- ability rows (fight_ability for players/pets, event-derived for
+            -- mobs), kind series and totals for the selected source: cached
+            local d = histDerived(S.sel, hsel)
+            local abils = d.abils
 
             -- stacked DPS histogram rebuilt from this fight's persisted events
             if S.sel.events and #S.sel.events > 0 then
-                -- encounter vs active DPS for the selected source, from events
-                local stot, abkt = 0, {}
-                for _, e in ipairs(S.sel.events) do
-                    if e.source == hsel and (e.amount or 0) > 0 and (e.outcome == 'hit' or e.outcome == nil) then
-                        stot = stot + e.amount; abkt[math.floor(e.t or 0)] = true
-                    end
-                end
-                local asec = 0; for _ in pairs(abkt) do asec = asec + 1 end
                 label('DPS over time - ' .. hsel)
-                if stot > 0 then
-                    local up = math.min(100, math.floor(asec / math.max(1, dur) * 100 + 0.5))
+                if d.stot > 0 then
+                    local up = math.min(100, math.floor(d.asec / math.max(1, dur) * 100 + 0.5))
                     rightText('fgFaint', string.format('%s dps / %s active  %d%% up',
-                        comma(stot / dur), comma(stot / math.max(1, asec)), up))
+                        comma(d.stot / dur), comma(d.stot / math.max(1, d.asec)), up))
                 end
                 local hw = ImGui.GetContentRegionAvail()
-                drawStackedArea(eventsToKindSeries(S.sel.events, hsel), dur, hw, 130)
+                drawStackedArea(d.kind, dur, hw, 130)
                 -- timeline: same widget as the live view, fed from stored events
                 label('Timeline')
                 ImGui.SameLine(0, 12)
                 drawTimelineFilters()
-                drawTimeline({ events = S.sel.events, duration = dur }, 240, hsel, abils)
+                if not S.sel._tl then S.sel._tl = {} end
+                local tl = S.sel._tl[hsel]
+                if not tl then tl = { events = d.events, duration = dur }; S.sel._tl[hsel] = tl end
+                drawTimeline(tl, 240, hsel, abils)
                 ImGui.Separator()
             end
             statRows('hbrk_tbl', breakdownRows(abils))
@@ -1973,6 +2023,9 @@ end
 
 -- Test hooks for the meter scope (see tests/test_meter_scope.lua).
 function UI.inGroupScope(row) return inScope(row, 'group') end
+function UI.histSources(sel) return histSources(sel) end
+function UI.histDerived(sel, source) return histDerived(sel, source) end
+function UI.sourceEvents(snap, source) return sourceEvents(snap, source) end
 function UI.inScope(row, scope) return inScope(row, scope) end
 function UI.pieSlices(rows, maxSlices) return pieSlices(rows, maxSlices) end
 function UI.setGroupOnly(v) S.settings.scope = v and 'group' or 'all' end
