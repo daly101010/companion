@@ -29,6 +29,7 @@ local db = {
   recentDeaths     = function() calls.deaths = calls.deaths + 1; return {} end,
   targetAggregates = function() calls.targets = calls.targets + 1; return {} end,
   weaponAggregates = function() calls.weapons = calls.weapons + 1; return {} end,
+  zoneRuns         = function() return {} end,
   getAllPrefs      = function() return {} end,
 }
 UI.setup({ db = db, playerName = 'Tester' })

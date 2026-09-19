@@ -29,6 +29,10 @@ local S     = {
     histMode    = 'fights', -- History left panel: 'fights' | 'targets' | 'weapons'
     targetFilter = nil, -- when set, the fights list is filtered to this mob
     weaponFilter = nil, -- {mainhand, offhand} filter for the fights list
+    runFilter   = nil, -- zone-run row {session_id, zone, ...}: fights list shows that run only
+    pendingRun  = nil, -- zone-run row requested from the By Zone table (served in refreshHistory)
+    selRun      = nil, -- loaded { run, fights, sources, targets } for runFilter
+    runView     = false, -- History right panel shows the run summary instead of a fight
     fightSearch = '',   -- fights-list target name filter
     fightSort   = { key = 'time', dir = 'desc' }, -- key: time|dps|dmg|dur
     liveScope   = 'fight', -- Live view: 'fight' (current pull) | 'overall' (zone totals)
@@ -1101,6 +1105,84 @@ local function drawSmarthealRow(f)
     return true
 end
 
+-- ── zone runs (History > By Zone) ──────────────────────────────────────
+local function zoneLabel(zone) return (zone and zone ~= '') and zone or 'no zone' end
+
+local function runLabel(r)
+    return string.format('%s %s', zoneLabel(r.zone), os.date('%m/%d', r.started_at or 0))
+end
+
+-- Combined DPS over the run's combat time (sum of fight durations).
+local function runDps(r)
+    local sec = r.combat_sec or 0
+    return sec > 0 and (r.total_dmg or 0) / sec or 0
+end
+
+-- Right-panel summary of one zone run: totals, everyone's damage over the
+-- whole run (list + pie) and what was fought. Reads S.selRun only.
+local function drawRunSummary(sr)
+    local r = sr.run
+    local combat = r.combat_sec or 0
+    local wall = math.max(0, (r.ended_at or 0) - (r.started_at or 0))
+    cardHeader('Zone run - ' .. zoneLabel(r.zone),
+        string.format('%d fights  %s dps', r.fights or 0, comma(runDps(r))))
+    ctext('fgDim', string.format('%s - %s   wall %s   combat %s',
+        os.date('%b %d %H:%M', r.started_at or 0), os.date('%H:%M', r.ended_at or 0), mmss(wall), mmss(combat)))
+    if (r.is_raid or 0) == 1 then ImGui.SameLine(0, 6); ctext('gold', '[RAID]') end
+
+    local mine = (r.player_dmg or 0) + (r.pet_dmg or 0)
+    local total = r.total_dmg or 0
+    local myPct = total > 0 and math.floor(mine / total * 100 + 0.5) or 0
+    ctext('fg', fmtK(total) .. ' damage')
+    ImGui.SameLine(0, 10); ctext('you', string.format('%s you+pet (%d%%)', fmtK(mine), myPct))
+    ImGui.SameLine(0, 10); ctext('enemy', fmtK(r.incoming) .. ' taken')
+    if (r.deaths or 0) > 0 then ImGui.SameLine(0, 10); ctext('resist', 'x' .. r.deaths .. ' deaths') end
+    if (r.heal_total or 0) > 0 then ImGui.SameLine(0, 10); ctext('green', fmtK(r.heal_total) .. ' healed') end
+    ImGui.Separator()
+
+    -- everyone's damage across the run (fight_ability rollup; heals excluded)
+    local srcs = {}
+    for _, row in ipairs(sr.sources or {}) do
+        srcs[#srcs + 1] = { name = row.source, total = row.total or 0,
+            dps = combat > 0 and (row.total or 0) / combat or 0,
+            isPet = (row.is_pet == 1), mine = (row.source == S.playerName) }
+    end
+    label('Damage by source'); rightText('fgFaint', #srcs .. ' sources')
+    if #srcs == 0 then
+        ctext('fgFaint', 'no ability rows for this run')
+    else
+        drawSourceList('run_src', srcs, nil)
+        ImGui.Separator()
+        label('Damage share')
+        drawPie(pieSlices(srcs, 8), 46, ImGui.GetContentRegionAvail())
+    end
+    ImGui.Separator()
+
+    -- what the run fought
+    label('Targets'); rightText('fgFaint', (r.targets or 0) .. ' distinct')
+    if ImGui.BeginTable('run_tgt', 5, bit32.bor(ImGuiTableFlags.RowBg, ImGuiTableFlags.BordersInnerH)) then
+        ImGui.TableSetupColumn('Target', ImGuiTableColumnFlags.WidthStretch)
+        ImGui.TableSetupColumn('N', ImGuiTableColumnFlags.WidthFixed, 30)
+        ImGui.TableSetupColumn('Avg DPS', ImGuiTableColumnFlags.WidthFixed, 62)
+        ImGui.TableSetupColumn('Avg dur', ImGuiTableColumnFlags.WidthFixed, 54)
+        ImGui.TableSetupColumn('Damage', ImGuiTableColumnFlags.WidthFixed, 62)
+        ImGui.TableHeadersRow()
+        for i, t in ipairs(sr.targets or {}) do
+            ImGui.PushID(i)
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn(); ctext('fgDim', t.mob or 'combat')
+            if (t.deaths or 0) > 0 then ImGui.SameLine(0, 6); ctext('resist', 'x' .. t.deaths) end
+            ImGui.TableNextColumn(); ctext('fgDim', tostring(t.fights or 0))
+            ImGui.TableNextColumn(); ctext('gold', comma(t.avg_dps))
+            ImGui.TableNextColumn(); ctext('fgDim', mmss(t.avg_dur))
+            ImGui.TableNextColumn(); ctext('fg', fmtK(t.total_dmg))
+            ImGui.PopID()
+        end
+        ImGui.EndTable()
+    end
+    ctext('fgFaint', 'Click a fight on the left for its own breakdown; [totals] brings this back.')
+end
+
 local function drawHistory()
     local H = S.hist
     local availW = ImGui.GetContentRegionAvail()
@@ -1119,6 +1201,17 @@ local function drawHistory()
     ImGui.SameLine(0, 12)
     ctext(S.histMode == 'weapons' and 'gold' or 'fgFaint', 'By Weapon')
     if ImGui.IsItemClicked(0) then S.histMode = 'weapons' end
+    ImGui.SameLine(0, 12)
+    ctext(S.histMode == 'runs' and 'gold' or 'fgFaint', 'By Zone')
+    if ImGui.IsItemClicked(0) then S.histMode = 'runs' end
+    if S.runFilter then
+        ImGui.SameLine(0, 12); ctext('fgDim', runLabel(S.runFilter))
+        ImGui.SameLine(0, 6); ctext(S.runView and 'gold' or 'fgFaint', '[totals]')
+        if ImGui.IsItemClicked(0) then S.runView = true end
+        if ImGui.IsItemHovered() then ImGui.SetTooltip('Show the combined totals for this zone run') end
+        ImGui.SameLine(0, 6); ctext('resist', '[clear]')
+        if ImGui.IsItemClicked(0) then S.runFilter = nil; S.selRun = nil; S.runView = false end
+    end
     if S.targetFilter then
         ImGui.SameLine(0, 12); ctext('fgDim', S.targetFilter)
         ImGui.SameLine(0, 6); ctext('resist', '[clear]')
@@ -1151,6 +1244,38 @@ local function drawHistory()
                 ImGui.TableNextColumn(); ctext('fgDim', tostring(t.fights))
                 ImGui.TableNextColumn(); ctext('gold', comma(t.avg_dps))
                 ImGui.TableNextColumn(); ctext('fgDim', comma(t.best_dps))
+                ImGui.PopID()
+            end
+            ImGui.EndTable()
+        end
+    elseif S.histMode == 'runs' then
+        -- one row per (session, zone): an instance run rolled up. Click to
+        -- filter the fights list to that run and show its combined totals.
+        if ImGui.BeginTable('runs_tbl', 5, bit32.bor(ImGuiTableFlags.RowBg,
+                ImGuiTableFlags.BordersInnerH, ImGuiTableFlags.ScrollY)) then
+            ImGui.TableSetupColumn('Zone', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('When', ImGuiTableColumnFlags.WidthFixed, 74)
+            ImGui.TableSetupColumn('N', ImGuiTableColumnFlags.WidthFixed, 30)
+            ImGui.TableSetupColumn('DPS', ImGuiTableColumnFlags.WidthFixed, 58)
+            ImGui.TableSetupColumn('Damage', ImGuiTableColumnFlags.WidthFixed, 62)
+            ImGui.TableHeadersRow()
+            for i, r in ipairs(H.runs or {}) do
+                ImGui.PushID(i)
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                local isSel = S.runFilter and S.runFilter.session_id == r.session_id and S.runFilter.zone == r.zone
+                local _, pressed = ImGui.Selectable(zoneLabel(r.zone) .. '##r', isSel and true or false,
+                    ImGuiSelectableFlags.SpanAllColumns)
+                if pressed then
+                    S.pendingRun = r; S.runFilter = r; S.runView = true; S.histMode = 'fights'
+                end
+                if r.session_id == H.sessionId then ImGui.SameLine(0, 6); ctext('green', 'now') end
+                if (r.is_raid or 0) == 1 then ImGui.SameLine(0, 6); ctext('gold', '[RAID]') end
+                if (r.deaths or 0) > 0 then ImGui.SameLine(0, 6); ctext('resist', 'x' .. r.deaths) end
+                ImGui.TableNextColumn(); ctext('fgDim', os.date('%m/%d %H:%M', r.started_at or 0))
+                ImGui.TableNextColumn(); ctext('fgDim', tostring(r.fights or 0))
+                ImGui.TableNextColumn(); ctext('gold', comma(runDps(r)))
+                ImGui.TableNextColumn(); ctext('fg', fmtK(r.total_dmg))
                 ImGui.PopID()
             end
             ImGui.EndTable()
@@ -1202,7 +1327,10 @@ local function drawHistory()
         local q = S.fightSearch:lower()
         local rows = {}
         local wf = S.weaponFilter
-        for _, f in ipairs(H.fights) do
+        -- a zone run lists ITS fights (queried per run, not capped by recentFights)
+        local pool = H.fights
+        if S.runFilter then pool = (S.selRun and S.selRun.fights) or {} end
+        for _, f in ipairs(pool) do
             local target = (f.primary_target or 'combat')
             if (not S.targetFilter or f.primary_target == S.targetFilter)
                 and (not wf or ((f.mainhand or '') == (wf.mh or '') and (f.offhand or '') == (wf.oh or '')))
@@ -1237,7 +1365,7 @@ local function drawHistory()
                 local selected = S.sel and S.sel.fight and S.sel.fight.id == f.id
                 local _, pressed = ImGui.Selectable(os.date('%H:%M', f.started_at), selected,
                     ImGuiSelectableFlags.SpanAllColumns)
-                if pressed then S.pendingSel = f.id end
+                if pressed then S.pendingSel = f.id; S.runView = false end
                 ImGui.TableNextColumn()
                 ctext('fgDim', f.primary_target or 'combat')
                 if f.is_raid == 1 then ImGui.SameLine(0, 6); ctext('gold', '[RAID]') end
@@ -1260,7 +1388,9 @@ local function drawHistory()
         -- selected fight detail: pick a source (players, pets, AND the mobs
         -- that hit you), then see its histogram, timeline, and breakdown
         ImGui.BeginChild('h_detail', 0, 0, true)
-        if S.sel and S.sel.fight then
+        if S.runView and S.selRun then
+            drawRunSummary(S.selRun)
+        elseif S.sel and S.sel.fight then
             local f = S.sel.fight
             local dur = f.duration or 1
             local srcs = sourcesFromAbilities(S.sel.abilities, dur)
@@ -1818,8 +1948,26 @@ function UI.refreshHistory(sessionMeta, force)
         S.hist.deaths = S.db:recentDeaths(40)
         S.hist.targets = S.db:targetAggregates(60)
         S.hist.weapons = S.db:weaponAggregates(60)
+        S.hist.runs = S.db:zoneRuns(60)
     end
     S.hist.session = sessionMeta
+    S.hist.sessionId = S.db.sessionId and S.db:sessionId() or nil
+    -- zone run: load on request, and reload the CURRENT session's run when a
+    -- fight just finished (force) so the open instance keeps accumulating
+    local run = S.pendingRun
+    S.pendingRun = nil
+    if not run and force and S.selRun and S.selRun.run.session_id == S.hist.sessionId then
+        run = S.selRun.run
+    end
+    if run then
+        local id, zone = run.session_id, run.zone or ''
+        S.selRun = { run = run, fights = S.db:runFights(id, zone),
+            sources = S.db:runSources(id, zone), targets = S.db:runTargets(id, zone) }
+        -- refresh the run's own totals from the aggregate list when it is there
+        for _, r in ipairs(S.hist.runs or {}) do
+            if r.session_id == id and (r.zone or '') == zone then S.selRun.run = r; S.runFilter = r end
+        end
+    end
     if S.pendingSel then
         local id = S.pendingSel
         S.pendingSel = nil
@@ -1863,7 +2011,14 @@ function UI.refreshHistory(sessionMeta, force)
     end
 end
 
-function UI.hasPendingSelect() return S.pendingSel ~= nil or S.pendingDeath ~= nil or S.exportRequest end
+function UI.hasPendingSelect()
+    return S.pendingSel ~= nil or S.pendingDeath ~= nil or S.pendingRun ~= nil or S.exportRequest
+end
+
+-- Test hooks for the zone-run selection (see tests/test_zone_runs.lua).
+function UI.selectRun(run) S.pendingRun = run; S.runFilter = run; S.runView = true end
+function UI.selectedRun() return S.selRun end
+function UI.clearRun() S.runFilter = nil; S.selRun = nil; S.runView = false end
 
 -- Visibility beacon. The history refresh only earns its cost while someone is
 -- looking at it, but hosts gate drawing differently (standalone uses S.open,

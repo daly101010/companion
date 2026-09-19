@@ -587,6 +587,90 @@ function DB:weaponAggregates(limit)
     return collectRows(stmt)
 end
 
+-- ── zone runs ─────────────────────────────────────────────────────────
+-- One row per (session, zone): every fight of one visit to a zone rolled up,
+-- so an instance run (Anguish, a DZ) reads as one combined record. Zones are
+-- NULL-safe via COALESCE so the run filter below can bind '' for a missing
+-- zone. Combined DPS is over combat time (SUM duration), wall time is
+-- first pull to last fight end.
+---@param limit integer
+---@return table  array of { session_id, zone, fights, started_at, ended_at, combat_sec,
+---                         total_dmg, player_dmg, pet_dmg, incoming, deaths, heal_total, is_raid, targets }
+function DB:zoneRuns(limit)
+    local stmt = self:_prepare([[
+        SELECT session_id, COALESCE(zone, '') AS zone, COUNT(*) AS fights,
+               MIN(started_at) AS started_at, MAX(ended_at) AS ended_at,
+               SUM(duration) AS combat_sec, SUM(total_dmg) AS total_dmg,
+               SUM(player_dmg) AS player_dmg, SUM(pet_dmg) AS pet_dmg,
+               SUM(incoming) AS incoming, SUM(deaths) AS deaths,
+               SUM(heal_total) AS heal_total, MAX(is_raid) AS is_raid,
+               COUNT(DISTINCT primary_target) AS targets
+        FROM fight WHERE session_id IN ]] .. CHAR_SESSIONS .. [[
+        GROUP BY session_id, COALESCE(zone, '')
+        ORDER BY started_at DESC
+        LIMIT ?;
+    ]])
+    if not stmt then return {} end
+    local n = self:_bindChar(stmt, 1)
+    stmt:bind(n, limit or 60)
+    return collectRows(stmt)
+end
+
+-- Every fight of one zone run (same columns as recentFights), newest first.
+---@param sessionId integer
+---@param zone string  '' for fights with no zone
+function DB:runFights(sessionId, zone)
+    local stmt = self:_prepare([[
+        SELECT id, started_at, duration, zone, primary_target, is_raid,
+               player_dmg, pet_dmg, total_dmg, dps, player_dps, incoming, deaths, mainhand, offhand,
+               sh_min_hp, sh_emerg_sec, sh_casts, sh_summary
+        FROM fight WHERE session_id = ? AND COALESCE(zone, '') = ?
+        ORDER BY id DESC LIMIT 500;
+    ]])
+    if not stmt then return {} end
+    stmt:bind(1, sessionId); stmt:bind(2, zone or '')
+    return collectRows(stmt)
+end
+
+-- Damage per source across a zone run (players + pets; heals excluded), so
+-- the run summary can rank everyone over the whole instance.
+---@param sessionId integer
+---@param zone string
+---@return table  array of { source, total, is_pet, fights }
+function DB:runSources(sessionId, zone)
+    local stmt = self:_prepare([[
+        SELECT source, SUM(total) AS total, MAX(is_pet) AS is_pet, COUNT(DISTINCT fight_id) AS fights
+        FROM fight_ability
+        WHERE kind <> 'heal' AND total > 0
+          AND fight_id IN (SELECT id FROM fight WHERE session_id = ? AND COALESCE(zone, '') = ?)
+        GROUP BY source
+        ORDER BY total DESC
+        LIMIT 60;
+    ]])
+    if not stmt then return {} end
+    stmt:bind(1, sessionId); stmt:bind(2, zone or '')
+    return collectRows(stmt)
+end
+
+-- What a zone run fought: per-target count, damage, avg DPS and deaths.
+---@param sessionId integer
+---@param zone string
+---@return table  array of { mob, fights, total_dmg, avg_dps, avg_dur, deaths }
+function DB:runTargets(sessionId, zone)
+    local stmt = self:_prepare([[
+        SELECT COALESCE(primary_target, 'combat') AS mob, COUNT(*) AS fights,
+               SUM(total_dmg) AS total_dmg, AVG(dps) AS avg_dps, AVG(duration) AS avg_dur,
+               SUM(deaths) AS deaths
+        FROM fight WHERE session_id = ? AND COALESCE(zone, '') = ?
+        GROUP BY COALESCE(primary_target, 'combat')
+        ORDER BY total_dmg DESC
+        LIMIT 60;
+    ]])
+    if not stmt then return {} end
+    stmt:bind(1, sessionId); stmt:bind(2, zone or '')
+    return collectRows(stmt)
+end
+
 ---@return table|nil  the highest-DPS fight on record
 function DB:bestFight()
     local stmt = self:_prepare([[

@@ -196,6 +196,22 @@ same actor broadcast as damage.
   reuses `buildSnapshot` with summed fight-time as duration (cached via
   `overallRev`). Overall hides the per-second chart/timeline (per-fight only).
 
+## Zone runs (History > By Zone)
+
+`DB:zoneRuns` rolls `fight` up per `(session_id, COALESCE(zone,''))` so one
+visit to an instance (an Anguish run, a DZ) is one row: fights, first pull to
+last end, combat time, damage/mine/incoming/deaths/heals, distinct targets.
+Combined DPS = total damage over combat time (`ui.lua:runDps`), not wall time.
+Clicking a row sets `S.runFilter` + `S.pendingRun`; `refreshHistory` serves it
+(`DB:runFights` -- the run's own fights, not capped by `recentFights(60)` --
+plus `runSources` (fight_ability per source, heals excluded) and `runTargets`)
+into `S.selRun`, and the fights list shows only that run. The right panel shows
+`drawRunSummary` (totals, everyone's damage list + pie, targets table) while
+`S.runView` is set; clicking a fight clears it, `[totals]` restores it. The
+current session's run is reloaded on every `force` refresh so an open instance
+keeps accumulating; `S.hist.sessionId` marks it `now` in the table. Test:
+`luajit tests/test_zone_runs.lua`.
+
 ## Damage-share pie
 
 `ui.lua:pieSlices(rows, maxSlices)` (pure, `UI.pieSlices` for the test) ranks
