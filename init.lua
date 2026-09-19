@@ -198,6 +198,7 @@ printf('\ag[companion]\ax started for \ay%s\ax on \ay%s\ax. /companion to toggle
 
 -- ── main loop ──────────────────────────────────────────────────────────
 local lastRefresh, lastXp, lastPrune, lastBcast, lastPrefs = 0, 0, 0, 0, 0
+local pruneMore = false -- a prune slice reported leftover work
 local lastZone = tlo(function() return mq.TLO.Zone.ShortName() end, '')
 
 -- one XP snapshot at login so the trend has an anchor
@@ -247,8 +248,10 @@ while running and mq.TLO.MacroQuest.GameState() == 'INGAME' do
         db:snapshotXp(tlo(function() return mq.TLO.Me.Level() end, nil), aaTotal())
         lastXp = t
     end
-    if (t - lastPrune) > 600000 then
-        db:pruneEvents(UI.retentionDays())
+    -- prune in bounded slices: one every 10 min, then every tick while more
+    -- expired rows remain (each slice releases the write lock)
+    if pruneMore or (t - lastPrune) > 600000 then
+        pruneMore = db:pruneEvents(UI.retentionDays(), 2000)
         lastPrune = t
     end
 

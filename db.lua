@@ -55,6 +55,7 @@ local SCHEMA      = [[
     );
     CREATE INDEX IF NOT EXISTS idx_fight_session ON fight(session_id);
     CREATE INDEX IF NOT EXISTS idx_fight_dps     ON fight(dps);
+    CREATE INDEX IF NOT EXISTS idx_fight_ended   ON fight(ended_at);
 
     CREATE TABLE IF NOT EXISTS fight_ability (
         id       INTEGER PRIMARY KEY,
@@ -861,19 +862,56 @@ end
 
 -- ── maintenance ───────────────────────────────────────────────────────
 -- Drop raw events older than `days` while keeping fight/ability rollups.
-function DB:pruneEvents(days)
+-- Prune raw events of fights older than `days`, a bounded slice at a time.
+--
+-- The old form ("DELETE ... WHERE fight_id IN (SELECT id FROM fight WHERE
+-- ended_at < ?)") scanned the whole fight table (no index on ended_at) and
+-- deleted every expired row in ONE statement: on a 9M-row event table that is
+-- seconds of write lock, which every other boxed client's 750ms busy_timeout
+-- turns into failed saves. Now: idx_fight_ended finds expired fights, we walk
+-- them in id order from the last fight known to be fully pruned
+-- (self._prunedThrough), and delete at most `budget` event rows per call via
+-- a rowid subquery (DELETE ... LIMIT needs a non-default SQLite build).
+--
+-- Returns true when there is more to do; the main loops then call again next
+-- tick so the work is spread across ticks and the lock is released between
+-- slices. When nothing expired since last time the call is one indexed SELECT.
+---@param days integer
+---@param budget integer|nil  max event rows per call (default 2000)
+---@return boolean more
+function DB:pruneEvents(days, budget)
+    budget = budget or 2000
     local cutoff = os.time() - (days or 14) * 86400
-    local stmt = self:_prepare([[
-        DELETE FROM event WHERE fight_id IN (SELECT id FROM fight WHERE ended_at < ?);
-    ]])
-    if not stmt then return end
-    stmt:bind(1, cutoff)
-    stmt:step(); stmt:finalize()
+    self._prunedThrough = self._prunedThrough or 0
+    local deleted, fightsChecked = 0, 0
+    while deleted < budget and fightsChecked < 50 do
+        -- next expired fight past the pruned watermark (fight ids are monotonic)
+        local fs = self:_prepare("SELECT id FROM fight WHERE ended_at < ? AND id > ? ORDER BY id LIMIT 1;")
+        if not fs then return false end
+        fs:bind(1, cutoff); fs:bind(2, self._prunedThrough)
+        local fightId = nil
+        for row in fs:nrows() do fightId = row.id end
+        fs:finalize()
+        if not fightId then return false end -- nothing expired beyond the watermark
+        fightsChecked = fightsChecked + 1
 
-    local ds = self:_prepare([[
-        DELETE FROM smartheal_decision WHERE fight_id IN (SELECT id FROM fight WHERE ended_at < ?);
-    ]])
-    if ds then ds:bind(1, cutoff); ds:step(); ds:finalize() end
+        local es = self:_prepare(
+            "DELETE FROM event WHERE id IN (SELECT id FROM event WHERE fight_id = ? LIMIT ?);")
+        if not es then return false end
+        es:bind(1, fightId); es:bind(2, budget - deleted)
+        local rc = es:step(); es:finalize()
+        if rc ~= sqlite.DONE then return true end -- BUSY: try again next tick
+        local n = self._db:changes()
+        deleted = deleted + n
+        if deleted < budget then
+            -- fewer rows than asked for: this fight is empty now; its decision
+            -- rows go with it and the watermark moves past it
+            local ds = self:_prepare("DELETE FROM smartheal_decision WHERE fight_id = ?;")
+            if ds then ds:bind(1, fightId); ds:step(); ds:finalize() end
+            self._prunedThrough = fightId
+        end
+    end
+    return true
 end
 
 -- ── prefs (window geometry, filter/mode UI state) ─────────────────────

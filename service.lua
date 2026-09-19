@@ -33,6 +33,7 @@ local sessionStart = 0
 local fightsThisSession = 0
 local needRefresh = true
 local lastRefresh, lastXp, lastPrune, lastBcast, lastPrefs = 0, 0, 0, 0, 0
+local pruneMore = false -- a prune slice reported leftover work
 local lastZone = ''
 
 local function tlo(fn, default)
@@ -193,8 +194,10 @@ function M.tick()
         db:snapshotXp(tlo(function() return mq.TLO.Me.Level() end, nil), aaTotal())
         lastXp = t
     end
-    if (t - lastPrune) > 600000 then
-        db:pruneEvents(UI.retentionDays())
+    -- prune in bounded slices: one every 10 min, then every tick while more
+    -- expired rows remain (each slice releases the write lock)
+    if pruneMore or (t - lastPrune) > 600000 then
+        pruneMore = db:pruneEvents(UI.retentionDays(), 2000)
         lastPrune = t
     end
 end
