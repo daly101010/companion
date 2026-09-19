@@ -25,7 +25,9 @@ end
 _G.printf = function() end
 
 local Combat = require('combat')
+local finalized
 Combat.init({
+  onFinalize = function(f) finalized = f end,
   playerName = function() return 'Calbuss' end,
   getZone = function() return 'Dranik' end,
   getWeapons = function() return nil, nil end,
@@ -89,6 +91,8 @@ check('kill-by-other does not change the existing targets rollup', enc.targets['
 clock = clock + 20000 -- past the inactivity gap (gettime() is in ms)
 Combat.tick()
 check('encounter finalized (no longer active)', getActive() == nil)
+check('finalized fight is flagged killed (slain line named the primary target)', finalized and finalized.killed == true,
+  finalized and tostring(finalized.killed))
 handlers.cmp_kill_other('a bat has been slain by Daly!', 'a bat', 'Daly')
 check('kill-by-other with no active fight opens nothing', getActive() == nil)
 

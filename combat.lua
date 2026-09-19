@@ -131,6 +131,7 @@ local function newEncounter()
         hpEst       = { sum = 0, weight = 0, target = nil }, -- weighted max-HP estimate
         hpTrail     = {},  -- last 30s of { t = ms, pct } samples of the primary target (time-to-kill)
         hpMinPct    = nil, -- lowest HP% seen on the primary target (attempt tracking)
+        kills       = {},  -- target name -> true once a "slain" line names it
         hpLastSample = nil, -- gettime() of the last 1Hz HP sample (per-encounter,
                              -- so a fresh encounter never inherits a prior one's throttle)
     }
@@ -500,6 +501,7 @@ local function buildFight(enc)
         mob_max_hp     = (enc.hpEst.weight > 0) and (enc.hpEst.sum / enc.hpEst.weight) or nil,
         mob_hp_weight  = enc.hpEst.weight,
         mob_min_hp     = enc.hpMinPct, -- lowest primary-target HP% seen (attempt tracking)
+        killed         = (primary ~= nil and enc.kills[primary] == true), -- a slain line named the primary target
         abilities      = abilities,
         casts          = buildCasts(enc),
         events         = enc.events,
@@ -931,6 +933,7 @@ function M.registerEvents()
     -- deaths
     reg('cmp_kill_you', "You have slain #1#!#*#", function(_, target)
         local enc = ensureActive()
+        enc.kills[target] = true
         if #enc.events < M.maxEvents then
             enc.events[#enc.events + 1] = { t = enc.lastClock - enc.startClock, source = cb.playerName(),
                 target = target, ability = 'Kill', kind = 'kill', amount = 0, outcome = 'kill' }
@@ -943,6 +946,7 @@ function M.registerEvents()
     reg('cmp_kill_other', "#1# has been slain by #2#!#*#", function(_, target, killer)
         if not active then return end
         local enc = ensureActive(false)
+        enc.kills[target] = true
         if #enc.events < M.maxEvents then
             enc.events[#enc.events + 1] = { t = enc.lastClock - enc.startClock, source = killer,
                 target = target, ability = 'Kill', kind = 'kill', amount = 0, outcome = 'kill' }

@@ -204,6 +204,8 @@ function DB.new(path)
     self:_ensureColumn('fight', 'sh_emerg_sec', 'REAL')
     self:_ensureColumn('fight', 'sh_casts',     'INTEGER')
     self:_ensureColumn('fight', 'sh_summary',   'TEXT')
+    self:_ensureColumn('fight', 'killed',       'INTEGER NOT NULL DEFAULT 0') -- primary target slain
+    self:_ensureColumn('fight', 'mob_min_hp',   'REAL')                       -- lowest target HP% seen
     self:_ensureKindIndex()
     return self
 end
@@ -359,8 +361,8 @@ function DB:saveFight(fight)
         INSERT INTO fight(session_id, started_at, ended_at, duration, zone, primary_target, is_raid,
                           player_dmg, pet_dmg, other_dmg, total_dmg, dps, player_dps, incoming, deaths,
                           heal_total, overheal, mainhand, offhand, mob_max_hp, mob_hp_weight,
-                          sh_min_hp, sh_emerg_sec, sh_casts, sh_summary)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                          sh_min_hp, sh_emerg_sec, sh_casts, sh_summary, killed, mob_min_hp)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
     ]])
     if not fs then self:_exec("ROLLBACK;") return nil end
     fs:bind(1, self._sessionId)
@@ -388,6 +390,8 @@ function DB:saveFight(fight)
     fs:bind(23, fight.sh_emerg_sec)
     fs:bind(24, fight.sh_casts)
     fs:bind(25, fight.sh_summary)
+    fs:bind(26, b(fight.killed))
+    fs:bind(27, fight.mob_min_hp)
     local rc = fs:step(); fs:finalize()
     if rc ~= sqlite.DONE then
         -- bail before child rows attach to a stale last_insert_rowid
@@ -614,7 +618,7 @@ function DB:recentFights(limit)
     local stmt = self:_prepare([[
         SELECT id, started_at, duration, zone, primary_target, is_raid,
                player_dmg, pet_dmg, total_dmg, dps, player_dps, incoming, deaths, mainhand, offhand,
-               sh_min_hp, sh_emerg_sec, sh_casts, sh_summary
+               sh_min_hp, sh_emerg_sec, sh_casts, sh_summary, killed, mob_min_hp
         FROM fight WHERE session_id IN ]] .. CHAR_SESSIONS .. [[
         ORDER BY id DESC LIMIT ?;
     ]])
@@ -702,7 +706,7 @@ function DB:runFights(sessionId, zone)
     local stmt = self:_prepare([[
         SELECT id, started_at, duration, zone, primary_target, is_raid,
                player_dmg, pet_dmg, total_dmg, dps, player_dps, incoming, deaths, mainhand, offhand,
-               sh_min_hp, sh_emerg_sec, sh_casts, sh_summary
+               sh_min_hp, sh_emerg_sec, sh_casts, sh_summary, killed, mob_min_hp
         FROM fight WHERE session_id = ? AND COALESCE(zone, '') = ?
         ORDER BY id DESC LIMIT 500;
     ]])
@@ -739,7 +743,8 @@ function DB:runTargets(sessionId, zone)
     local stmt = self:_prepare([[
         SELECT COALESCE(primary_target, 'combat') AS mob, COUNT(*) AS fights,
                SUM(total_dmg) AS total_dmg, AVG(dps) AS avg_dps, AVG(duration) AS avg_dur,
-               SUM(deaths) AS deaths
+               SUM(deaths) AS deaths, SUM(killed) AS kills, MIN(mob_min_hp) AS min_hp,
+               MAX(is_raid) AS is_raid
         FROM fight WHERE session_id = ? AND COALESCE(zone, '') = ?
         GROUP BY COALESCE(primary_target, 'combat')
         ORDER BY total_dmg DESC

@@ -1233,6 +1233,51 @@ local function runDps(r)
     return sec > 0 and (r.total_dmg or 0) / sec or 0
 end
 
+-- Attempts: within a zone run, fights against the same target in fight-id
+-- (chronological) order. Returns { [target] = { attempts = n, kills = n,
+-- bestPct = lowest HP% on a wipe|nil, byFight = { [fightId] = { n, killed } } } }.
+-- Pure -- exposed as UI.attemptsByTarget for the test.
+local function attemptsByTarget(fights)
+    local sorted = {}
+    for _, f in ipairs(fights or {}) do sorted[#sorted + 1] = f end
+    table.sort(sorted, function(a, b) return (a.id or 0) < (b.id or 0) end)
+    local out = {}
+    for _, f in ipairs(sorted) do
+        local tgt = f.primary_target or 'combat'
+        local t = out[tgt]
+        if not t then t = { attempts = 0, kills = 0, bestPct = nil, byFight = {} }; out[tgt] = t end
+        t.attempts = t.attempts + 1
+        local killed = (f.killed == 1 or f.killed == true)
+        if killed then
+            t.kills = t.kills + 1
+        elseif f.mob_min_hp ~= nil then
+            if t.bestPct == nil or f.mob_min_hp < t.bestPct then t.bestPct = f.mob_min_hp end
+        end
+        t.byFight[f.id] = { n = t.attempts, killed = killed }
+    end
+    return out
+end
+
+-- "3 attempts, kill on #3" / "2 wipes, best 12%" / "kill" for a target summary.
+local function attemptText(t)
+    if not t or t.attempts == 0 then return '' end
+    if t.attempts == 1 then
+        if t.kills == 1 then return 'kill' end
+        return t.bestPct and string.format('wipe at %d%%', math.floor(t.bestPct + 0.5)) or 'wipe'
+    end
+    local parts = { t.attempts .. ' attempts' }
+    if t.kills > 0 then
+        local firstKill
+        for _, a in pairs(t.byFight) do
+            if a.killed and (not firstKill or a.n < firstKill) then firstKill = a.n end
+        end
+        parts[#parts + 1] = t.kills == t.attempts and 'all kills' or ('kill on #' .. firstKill)
+    else
+        parts[#parts + 1] = t.bestPct and string.format('best %d%%', math.floor(t.bestPct + 0.5)) or 'no kill'
+    end
+    return table.concat(parts, ', ')
+end
+
 -- Right-panel summary of one zone run: totals, everyone's damage over the
 -- whole run (list + pie) and what was fought. Reads S.selRun only.
 local function drawRunSummary(sr)
@@ -1275,8 +1320,10 @@ local function drawRunSummary(sr)
 
     -- what the run fought
     label('Targets'); rightText('fgFaint', (r.targets or 0) .. ' distinct')
-    if ImGui.BeginTable('run_tgt', 5, bit32.bor(ImGuiTableFlags.RowBg, ImGuiTableFlags.BordersInnerH)) then
+    if not sr.attempts then sr.attempts = attemptsByTarget(sr.fights) end
+    if ImGui.BeginTable('run_tgt', 6, bit32.bor(ImGuiTableFlags.RowBg, ImGuiTableFlags.BordersInnerH)) then
         ImGui.TableSetupColumn('Target', ImGuiTableColumnFlags.WidthStretch)
+        ImGui.TableSetupColumn('Attempts', ImGuiTableColumnFlags.WidthFixed, 118)
         ImGui.TableSetupColumn('N', ImGuiTableColumnFlags.WidthFixed, 30)
         ImGui.TableSetupColumn('Avg DPS', ImGuiTableColumnFlags.WidthFixed, 62)
         ImGui.TableSetupColumn('Avg dur', ImGuiTableColumnFlags.WidthFixed, 54)
@@ -1287,6 +1334,12 @@ local function drawRunSummary(sr)
             ImGui.TableNextRow()
             ImGui.TableNextColumn(); ctext('fgDim', t.mob or 'combat')
             if (t.deaths or 0) > 0 then ImGui.SameLine(0, 6); ctext('resist', 'x' .. t.deaths) end
+            ImGui.TableNextColumn()
+            local at = sr.attempts[t.mob or 'combat']
+            -- kill/wipe wording only means something for named/raid targets or
+            -- multi-pull mobs; trash that died once just shows a kill
+            local txt = attemptText(at)
+            ctext(at and at.kills > 0 and 'green' or 'resist', txt)
             ImGui.TableNextColumn(); ctext('fgDim', tostring(t.fights or 0))
             ImGui.TableNextColumn(); ctext('gold', comma(t.avg_dps))
             ImGui.TableNextColumn(); ctext('fgDim', mmss(t.avg_dur))
@@ -1484,6 +1537,19 @@ local function drawHistory()
                 ImGui.TableNextColumn()
                 ctext('fgDim', f.primary_target or 'combat')
                 if f.is_raid == 1 then ImGui.SameLine(0, 6); ctext('gold', '[RAID]') end
+                if S.runFilter and S.selRun then
+                    -- attempt number + outcome within the run (raid targets and repeat pulls)
+                    if not S.selRun.attempts then S.selRun.attempts = attemptsByTarget(S.selRun.fights) end
+                    local at = S.selRun.attempts[f.primary_target or 'combat']
+                    local a = at and at.byFight[f.id]
+                    if a and (at.attempts > 1 or f.is_raid == 1) then
+                        ImGui.SameLine(0, 6)
+                        if a.killed then ctext('green', '#' .. a.n .. ' kill')
+                        else
+                            ctext('resist', '#' .. a.n .. (f.mob_min_hp and string.format(' wipe %d%%', math.floor(f.mob_min_hp + 0.5)) or ' wipe'))
+                        end
+                    end
+                end
                 ImGui.TableNextColumn(); ctext('fgDim', mmss(f.duration))
                 ImGui.TableNextColumn(); ctext('gold', comma(f.dps))
                 ImGui.TableNextColumn(); ctext('fg', fmtK(f.total_dmg))
@@ -2032,6 +2098,8 @@ end
 -- Test hooks for the meter scope (see tests/test_meter_scope.lua).
 function UI.inGroupScope(row) return inScope(row, 'group') end
 function UI.histSources(sel) return histSources(sel) end
+function UI.attemptsByTarget(fights) return attemptsByTarget(fights) end
+function UI.attemptText(t) return attemptText(t) end
 function UI.histDerived(sel, source) return histDerived(sel, source) end
 function UI.sourceEvents(snap, source) return sourceEvents(snap, source) end
 function UI.inScope(row, scope) return inScope(row, scope) end

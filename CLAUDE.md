@@ -225,6 +225,20 @@ current session's run is reloaded on every `force` refresh so an open instance
 keeps accumulating; `S.hist.sessionId` marks it `now` in the table. Test:
 `luajit tests/test_zone_runs.lua`.
 
+## Attempts + time-to-kill
+
+`combat.lua:trackHp` keeps a 30 s trail of the primary target's HP% (fed by the
+1 Hz `sampleMobHp`); `M.ttkEstimate` turns it into `snap.targetPct`/`snap.ttk`
+(nil until 5 s of trail or while HP is not falling; a heal > 2% or a target
+switch restarts the trail). Shown as `43% ~1:12 to kill` on the Live summary
+and mini header. `enc.kills` records every "slain" line's target; finalize
+stamps `fight.killed` (primary target slain) and `fight.mob_min_hp` (lowest
+HP% seen), persisted as `killed`/`mob_min_hp`. `ui.lua:attemptsByTarget`
+(pure) numbers a run's fights per target in id order and marks kill/wipe +
+best %; the fights list shows `#n kill` / `#n wipe 34%` under a run filter and
+the run summary's Targets table has an Attempts column. Tests:
+`luajit tests/test_ttk.lua`, `tests/test_attempts.lua`, `tests/test_kill_events.lua`.
+
 ## Damage-share pie
 
 `ui.lua:pieSlices(rows, maxSlices)` (pure, `UI.pieSlices` for the test) ranks
