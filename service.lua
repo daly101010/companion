@@ -155,7 +155,9 @@ end
 function M.tick()
     if not M.enabled then return end
     Combat.tick()
-    blackbox:tick(mq.gettime())
+    if blackbox:tick(mq.gettime()) then
+        UI.setRoster(blackbox:latest().group) -- group roster for the "group only" meter scope
+    end
     if blackbox:deadEdge() then Combat.recordDeath(nil) end
 
     local zone = tlo(function() return mq.TLO.Zone.ShortName() end, lastZone)

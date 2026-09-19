@@ -150,6 +150,14 @@ Runtime tunables live in `S.settings` and persist as `set_*` pref keys
   only; fight/ability rollups are kept forever).
 - **miniRows** → `drawMini` row cap.
 - **share** → `Group.setEnabled` (group-sharing on/off).
+- **groupOnly** → meter scope (`set_grouponly`). When on, the mini meter, the
+  Live "Damage by source" card and the Healing tab's healer meter keep only rows
+  that pass `ui.lua:inGroupScope`: me, my group members (`S.roster`, fed by
+  `UI.setRoster()` from the black-box sample's `group` array in both main loops),
+  companion peers (`freshPeers()`), and any of those players' pets (owner parsed
+  off the normalized `` <Owner>`s pet `` name). Also toggled by the `all | group`
+  switch on the mini header and those two card headers. History is never scoped.
+  Test: `luajit tests/test_meter_scope.lua`.
 The tab also has a **Reset window position/size** button (sets `S._win` +
 `S._winApply`, consumed by the geometry-apply path in `render`).
 

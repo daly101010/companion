@@ -211,6 +211,7 @@ while running and mq.TLO.MacroQuest.GameState() == 'INGAME' do
         -- Only while a fight is active: downtime HP (medding, running back) is not this
         -- fight's data, and the bucket does not reset until the fight ends.
         if Combat.inCombat() then Smartheal.observe(blackbox:latest(), nowMs) end
+        UI.setRoster(blackbox:latest().group) -- group roster for the "group only" meter scope
     end
     UI.setSmartheal(Smartheal.snapshot())
     -- Me.Dead edge: catches a death whose chat line was filtered (deduped in Combat)

@@ -41,7 +41,8 @@ local S     = {
     tlHighlight = nil, -- ability name whose timeline lane is highlighted/tracked
     mini        = false, -- compact meter mode (just the current fight's DPS)
     miniMode    = 'dps', -- mini meter: 'dps' | 'hps'
-    settings    = { timeout = 12, retentionDays = 14, share = true, miniRows = 12 },
+    settings    = { timeout = 12, retentionDays = 14, share = true, miniRows = 12, groupOnly = false },
+    roster      = {},  -- lowercased names of my current group members (set by the main loop)
     hist        = { fights = {}, best = nil, sessions = {}, xp = {}, session = nil },
     lastRefresh = 0,
 }
@@ -246,6 +247,54 @@ local function sourcesFromAbilities(abils, duration)
     end
     table.sort(arr, function(x, y) return x.total > y.total end)
     return arr
+end
+
+-- ── meter scope (all vs. group only) ───────────────────────────────────
+-- In a raid the meter fills with 50+ strangers; "group only" keeps just me,
+-- my group members (roster from the black-box sampler), companion peers (my
+-- boxes, by definition) and any of those players' pets. Pets normalize to
+-- "<Owner>`s pet" in combat.lua, so ownership is read straight off the name.
+local function petOwner(name)
+    return tostring(name or ''):match("^(.-)[`']s %a+$")
+end
+
+-- Does this meter row belong to my group? row = { name, mine?, peer? }.
+-- Exposed as UI.inGroupScope for the test.
+local function inGroupScope(row)
+    if row.mine or row.peer then return true end
+    local name = tostring(row.name or ''):lower()
+    local me = tostring(S.playerName or ''):lower()
+    if name == me or name == 'you' or S.roster[name] then return true end
+    local owner = petOwner(row.name)
+    if owner then
+        owner = owner:lower()
+        if owner == me or S.roster[owner] then return true end
+        if S.group then
+            for _, p in ipairs(S.group.freshPeers()) do
+                if tostring(p.player or ''):lower() == owner then return true end
+            end
+        end
+    end
+    return false
+end
+
+-- Apply the meter scope to an array of rows (returns the same array when off).
+local function scopeRows(rows)
+    if not S.settings.groupOnly then return rows end
+    local out = {}
+    for _, r in ipairs(rows) do if inGroupScope(r) then out[#out + 1] = r end end
+    return out
+end
+
+-- Clickable "all | group" scope switch, drawn on the current line.
+local function scopeToggle(gap)
+    local g = S.settings.groupOnly
+    ImGui.SameLine(0, gap or 8); ctext(g and 'fgFaint' or 'gold', 'all')
+    if ImGui.IsItemClicked(0) then S.settings.groupOnly = false end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Show every damage source') end
+    ImGui.SameLine(0, 6); ctext(g and 'you' or 'fgFaint', 'group')
+    if ImGui.IsItemClicked(0) then S.settings.groupOnly = true end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Only me, my group members, my boxes and our pets (raids)') end
 end
 
 -- Clickable "damage by source" list. Highlights selName; returns clicked name or nil.
@@ -730,10 +779,17 @@ local function drawLive()
 
     -- selected attacker drives the breakdown + timeline (default: local player).
     -- Falls back to player, then the top source, if the selection isn't in this fight.
+    local sources = scopeRows(snap.sources)
     local function hasAbil(nm) return nm and snap.abilitiesBySource[nm] end
-    local sel = (hasAbil(S.liveSource) and S.liveSource)
+    -- a selection the scope just hid falls back like any missing source
+    local function listed(nm)
+        if not hasAbil(nm) then return false end
+        for _, s in ipairs(sources) do if s.name == nm then return true end end
+        return false
+    end
+    local sel = (listed(S.liveSource) and S.liveSource)
         or (hasAbil(S.playerName) and S.playerName)
-        or (snap.sources[1] and snap.sources[1].name)
+        or (sources[1] and sources[1].name)
         or S.playerName
     local selAbil = snap.abilitiesBySource[sel] or {}
     local selInfo
@@ -801,8 +857,15 @@ local function drawLive()
     do
         -- damage by source (click a row to drive the breakdown + timeline)
         ImGui.BeginChild('cmp_src', 0, 150, true)
-        cardHeader('Damage by source', fmtK(snap.total) .. ' out')
-        local clicked = drawSourceList('src_tbl', snap.sources, sel)
+        local outTotal = snap.total
+        if S.settings.groupOnly then
+            outTotal = 0
+            for _, s in ipairs(sources) do outTotal = outTotal + (s.total or 0) end
+        end
+        label('Damage by source'); scopeToggle(10)
+        rightText('fgFaint', fmtK(outTotal) .. ' out')
+        ImGui.Separator()
+        local clicked = drawSourceList('src_tbl', sources, sel)
         if clicked then S.liveSource = clicked end
         ImGui.EndChild()
 
@@ -1403,7 +1466,7 @@ local function drawHealing()
     if not snap then
         ImGui.Dummy(0, 20); ctext('fgFaint', 'Waiting for combat...'); return
     end
-    local healers = snap.healSources or {}
+    local healers = scopeRows(snap.healSources or {})
     local totalHeal, totalOver = 0, 0
     for _, h in ipairs(healers) do totalHeal = totalHeal + h.total; totalOver = totalOver + h.over end
 
@@ -1494,7 +1557,9 @@ local function drawHealing()
     -- left: healer meter (ranked by healing)
     ImGui.BeginChild('heal_list', leftW, 0, false)
     ImGui.BeginChild('heal_list_card', 0, 0, true)
-    cardHeader('Healers', 'by healing')
+    label('Healers'); scopeToggle(10)
+    rightText('fgFaint', 'by healing')
+    ImGui.Separator()
     for i, h in ipairs(healers) do
         ImGui.PushID(i)
         local color = h.mine and 'you' or 'green'
@@ -1583,6 +1648,12 @@ local function drawSettings()
     local sh, ch4 = ImGui.Checkbox('Group sharing over actors', st.share)
     if ch4 then st.share = sh; if S.group and S.group.setEnabled then S.group.setEnabled(sh) end end
     ctext('fgFaint', 'Broadcast your damage/healing so boxes merge into one group meter.')
+    ImGui.Dummy(0, 4)
+
+    local go, ch5 = ImGui.Checkbox('Group only (raid filter)', st.groupOnly)
+    if ch5 then st.groupOnly = go end
+    ctext('fgFaint', 'Meters show only you, your group members, your companion boxes and their pets.')
+    ctext('fgFaint', 'Same switch as the all | group toggle on the mini meter and source cards.')
     ImGui.Separator()
 
     if ImGui.Button('Reset window position/size') then
@@ -1613,6 +1684,25 @@ end
 --- only ever reads S.smartheal, per the no-work-in-render invariant.
 ---@param snap table|nil
 function UI.setSmartheal(snap) S.smartheal = snap end
+
+-- Cache my current group roster for the "group only" meter scope. Called from
+-- the main loop with the black-box sample's group array ({ name = ... }, me
+-- excluded) -- the render callback only reads S.roster. nil leaves it as is.
+---@param members table|nil
+function UI.setRoster(members)
+    if type(members) ~= 'table' then return end
+    local set = {}
+    for _, m in ipairs(members) do
+        local n = type(m) == 'table' and m.name or m
+        if n and n ~= '' then set[tostring(n):lower()] = true end
+    end
+    S.roster = set
+end
+
+-- Test hooks for the meter scope (see tests/test_meter_scope.lua).
+function UI.inGroupScope(row) return inGroupScope(row) end
+function UI.setGroupOnly(v) S.settings.groupOnly = v and true or false end
+function UI.groupOnly() return S.settings.groupOnly end
 
 -- The four history queries are nowhere near equally cheap. recentFights is a
 -- 60-row walk down idx_fight_session; the two aggregates GROUP BY the whole
@@ -1712,6 +1802,7 @@ function UI.loadPrefs()
     if p.set_retention then st.retentionDays = tonumber(p.set_retention) or st.retentionDays end
     if p.set_minirows then st.miniRows = tonumber(p.set_minirows) or st.miniRows end
     if p.set_share then st.share = (p.set_share == '1') end
+    if p.set_grouponly then st.groupOnly = (p.set_grouponly == '1') end
     if S.combat then S.combat.timeoutSec = st.timeout end
     if S.group and S.group.setEnabled then S.group.setEnabled(st.share) end
     if p.fight_sort then
@@ -1745,12 +1836,13 @@ function UI.savePrefs()
     if mv ~= S._savedMini then S.db:setPref('mini', mv); S._savedMini = mv end
     -- settings (only write on change)
     local st = S.settings
-    local sig = table.concat({ st.timeout, st.retentionDays, st.miniRows, st.share and 1 or 0 }, ',')
+    local sig = table.concat({ st.timeout, st.retentionDays, st.miniRows, st.share and 1 or 0, st.groupOnly and 1 or 0 }, ',')
     if sig ~= S._savedSettings then
         S.db:setPref('set_timeout', st.timeout)
         S.db:setPref('set_retention', st.retentionDays)
         S.db:setPref('set_minirows', st.miniRows)
         S.db:setPref('set_share', st.share and '1' or '0')
+        S.db:setPref('set_grouponly', st.groupOnly and '1' or '0')
         S._savedSettings = sig
     end
 end
@@ -1786,6 +1878,8 @@ local function drawMini()
             if ImGui.IsItemClicked(0) then S.miniMode = 'dps' end
             ImGui.SameLine(0, 8); ctext(hps and 'green' or 'fgFaint', 'hps')
             if ImGui.IsItemClicked(0) then S.miniMode = 'hps' end
+            ImGui.SameLine(0, 6); ctext('fgFaint', '|')
+            scopeToggle(6)
             rightText('fgFaint', mmss(snap.duration) .. (snap.live and '' or ' [end]'))
             ImGui.Separator()
 
@@ -1826,13 +1920,17 @@ local function drawMini()
             end
             local rows = {}
             for _, name in ipairs(order) do rows[#rows + 1] = byName[name] end
+            rows = scopeRows(rows)
             table.sort(rows, function(a, b) return a.total > b.total end)
 
             local top = (rows[1] and rows[1].total) or 1
             local grand = 0
             for _, r in ipairs(rows) do grand = grand + r.total end
             grand = grand > 0 and grand or 1
-            if #rows == 0 then ctext('fgFaint', hps and 'no healing yet' or 'no damage yet') end
+            if #rows == 0 then
+                ctext('fgFaint', S.settings.groupOnly and 'nothing from your group yet'
+                    or (hps and 'no healing yet' or 'no damage yet'))
+            end
             local maxRows = S.settings.miniRows or 12
             for i, s in ipairs(rows) do
                 if i > maxRows then break end
