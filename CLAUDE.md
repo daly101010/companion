@@ -196,6 +196,18 @@ same actor broadcast as damage.
   reuses `buildSnapshot` with summed fight-time as duration (cached via
   `overallRev`). Overall hides the per-second chart/timeline (per-fight only).
 
+## Damage-share pie
+
+`ui.lua:pieSlices(rows, maxSlices)` (pure, `UI.pieSlices` for the test) ranks
+meter rows and folds the tail into one `others (N)` slice; `drawPie` renders
+wedges as triangle fans through `Theme.drawlist` (`triangleFilled`) with a
+legend beside them. Slice colors come from `Theme.SLICE` in rank order; my own
+row is always `you`, others `fgFaint`. Shown as the Live tab's "Damage share"
+card (right column, fed the same scoped `sources` list as the source card, so
+the group filter applies) and under the mini meter's bars (`S.miniPie`, pref
+`mini_pie`, toggled by `pie` on the mini header or the Settings checkbox; in
+hps mode it is a healing share). Test: `luajit tests/test_pie.lua`.
+
 ## Defensive / avoidance
 
 Avoidance IS log-derivable (unlike AC mitigation). `cmp_in_miss`

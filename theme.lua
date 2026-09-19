@@ -24,6 +24,7 @@ local HEX = {
     you      = '#d9b25f', pet      = '#6fb3d2', enemy    = '#cf6679',
     melee    = '#d9b25f', slay     = '#f6f0da', spell    = '#a98fe0', dot = '#6fb3d2', ds = '#cf6679',
     resist   = '#e05663',
+    orange   = '#f0a35f', teal     = '#5fd9d2', lime     = '#c9d65f',
     eqBorder = '#8a6f24', eqName   = '#5fe08a', eqEffect = '#f08ae0', eqRatio = '#ff8079', eqLabel = '#a8b0c6',
     black    = '#000000', white    = '#ffffff',
 }
@@ -39,6 +40,11 @@ for name, h in pairs(HEX) do
     local r, g, b = hexToRgb(h)
     Theme.C[name] = { r, g, b }
 end
+
+-- Slice colors for the damage-share pie, in rank order (my own row always
+-- takes 'you'; the aggregated "others" slice takes 'fgFaint'). Distinct hues
+-- from the same palette so the chart reads as part of the overlay.
+Theme.SLICE = { 'pet', 'spell', 'green', 'eqEffect', 'enemy', 'orange', 'teal', 'lime', 'slay', 'eqRatio' }
 
 -- Category color for a normalized damage kind.
 Theme.KIND = { melee = 'melee', nuke = 'spell', spell = 'spell', dot = 'dot', ds = 'ds', heal = 'green' }
@@ -190,6 +196,13 @@ function Safe:text(x, y, col, str)
     attempt(
         function() dl:AddText(ImVec2(x, y), col, str) end,
         function() dl:AddText(x, y, col, str) end)
+end
+
+function Safe:triangleFilled(x1, y1, x2, y2, x3, y3, col)
+    local dl = self._dl
+    attempt(
+        function() dl:AddTriangleFilled(ImVec2(x1, y1), ImVec2(x2, y2), ImVec2(x3, y3), col) end,
+        function() dl:AddTriangleFilled(x1, y1, x2, y2, x3, y3, col) end)
 end
 
 function Safe:circleFilled(cx, cy, r, col, seg)

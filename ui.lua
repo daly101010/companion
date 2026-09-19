@@ -41,6 +41,7 @@ local S     = {
     tlHighlight = nil, -- ability name whose timeline lane is highlighted/tracked
     mini        = false, -- compact meter mode (just the current fight's DPS)
     miniMode    = 'dps', -- mini meter: 'dps' | 'hps'
+    miniPie     = true,  -- mini meter: draw the damage-share pie under the bars
     settings    = { timeout = 12, retentionDays = 14, share = true, miniRows = 12, groupOnly = false },
     roster      = {},  -- lowercased names of my current group members (set by the main loop)
     hist        = { fights = {}, best = nil, sessions = {}, xp = {}, session = nil },
@@ -295,6 +296,82 @@ local function scopeToggle(gap)
     ImGui.SameLine(0, 6); ctext(g and 'you' or 'fgFaint', 'group')
     if ImGui.IsItemClicked(0) then S.settings.groupOnly = true end
     if ImGui.IsItemHovered() then ImGui.SetTooltip('Only me, my group members, my boxes and our pets (raids)') end
+end
+
+-- ── damage-share pie ───────────────────────────────────────────────────
+-- Fold meter rows ({ name, total, mine? }) into at most maxSlices pie slices,
+-- ranked by total; the tail past the cap collapses into one "others" slice.
+-- Each slice: { name, total, frac, color, mine }. Pure -- exposed as
+-- UI.pieSlices for the test.
+local function pieSlices(rows, maxSlices)
+    maxSlices = math.max(2, maxSlices or 8)
+    local sorted, grand = {}, 0
+    for _, r in ipairs(rows or {}) do
+        if (r.total or 0) > 0 then sorted[#sorted + 1] = r; grand = grand + r.total end
+    end
+    table.sort(sorted, function(a, b) return a.total > b.total end)
+    if grand <= 0 then return {}, 0 end
+    local slices, ci = {}, 0
+    local keep = (#sorted > maxSlices) and (maxSlices - 1) or #sorted
+    for i = 1, keep do
+        local r = sorted[i]
+        local color
+        if r.mine then color = 'you' else ci = ci + 1; color = Theme.SLICE[((ci - 1) % #Theme.SLICE) + 1] end
+        slices[#slices + 1] = { name = r.name, total = r.total, frac = r.total / grand, color = color, mine = r.mine }
+    end
+    if keep < #sorted then
+        local rest = 0
+        for i = keep + 1, #sorted do rest = rest + sorted[i].total end
+        slices[#slices + 1] = { name = string.format('others (%d)', #sorted - keep), total = rest,
+            frac = rest / grand, color = 'fgFaint', others = true }
+    end
+    return slices, grand
+end
+
+-- Draw a pie of `slices` (radius r) at the cursor with a legend to its right,
+-- using the crash-safe DrawList so a broken build just leaves the card blank.
+-- Advances layout by (w, h). Wedges are triangle fans from the centre.
+local function drawPie(slices, r, w)
+    local lineH = ImGui.GetTextLineHeight()
+    local h = math.max(2 * r + 6, #slices * (lineH + 2))
+    local dl = Theme.drawlist(ImGui.GetWindowDrawList())
+    if not dl or #slices == 0 then ImGui.Dummy(w, h); return end
+    local x, y = ImGui.GetCursorScreenPos()
+    local cx, cy = x + r + 3, y + h / 2
+    local ang = -math.pi / 2 -- start at 12 o'clock, clockwise
+    for _, sl in ipairs(slices) do
+        local sweep = sl.frac * 2 * math.pi
+        local segs = math.max(1, math.ceil(sweep / (2 * math.pi) * 48))
+        local col = Theme.u32(sl.color)
+        local step = sweep / segs
+        local a0 = ang
+        for i = 1, segs do
+            local a1 = a0 + step
+            dl:triangleFilled(cx, cy, cx + math.cos(a0) * r, cy + math.sin(a0) * r,
+                cx + math.cos(a1) * r, cy + math.sin(a1) * r, col)
+            a0 = a1
+        end
+        ang = ang + sweep
+    end
+    -- legend: colour swatch + name + share, one line per slice, clipped to the width
+    local lx = x + 2 * r + 14
+    local lw = w - (lx - x)
+    local ly = y + math.max(0, (h - #slices * (lineH + 2)) / 2)
+    for _, sl in ipairs(slices) do
+        local pct = string.format('%d%%', math.floor(sl.frac * 100 + 0.5))
+        local pw = ImGui.CalcTextSize(pct)
+        dl:rectFilled(lx, ly + 3, lx + 8, ly + 3 + lineH - 6, Theme.u32(sl.color), 2)
+        local name = tostring(sl.name)
+        local maxNameW = lw - 14 - pw - 6
+        if ImGui.CalcTextSize(name) > maxNameW then
+            while #name > 2 and ImGui.CalcTextSize(name .. '..') > maxNameW do name = name:sub(1, -2) end
+            name = name .. '..'
+        end
+        dl:text(lx + 12, ly, Theme.u32(sl.mine and 'you' or 'fg'), name)
+        dl:text(x + w - pw, ly, Theme.u32('fgFaint'), pct)
+        ly = ly + lineH + 2
+    end
+    ImGui.Dummy(w, h)
 end
 
 -- Clickable "damage by source" list. Highlights selName; returns clicked name or nil.
@@ -867,6 +944,17 @@ local function drawLive()
         ImGui.Separator()
         local clicked = drawSourceList('src_tbl', sources, sel)
         if clicked then S.liveSource = clicked end
+        ImGui.EndChild()
+
+        -- damage share: everyone in the fight (or just the group when scoped)
+        ImGui.BeginChild('cmp_pie', 0, 178, true)
+        local slices = pieSlices(sources, 8)
+        cardHeader('Damage share', #slices > 0 and (#sources .. ' sources') or nil)
+        if #slices == 0 then
+            ctext('fgFaint', S.settings.groupOnly and 'nothing from your group yet' or 'no damage yet')
+        else
+            drawPie(slices, 46, ImGui.GetContentRegionAvail())
+        end
         ImGui.EndChild()
 
         -- incoming, broken down per attacker (every mob/DoT/DS hitting you)
@@ -1643,6 +1731,9 @@ local function drawSettings()
     ImGui.SetNextItemWidth(220)
     local mr, ch3 = ImGui.SliderInt('##set_minirows', st.miniRows, 3, 24)
     if ch3 then st.miniRows = mr end
+    local mp, chp = ImGui.Checkbox('Mini meter share pie', S.miniPie)
+    if chp then S.miniPie = mp end
+    ctext('fgFaint', 'Damage (or healing) share pie under the mini meter bars; also the pie toggle on its header.')
     ImGui.Dummy(0, 4)
 
     local sh, ch4 = ImGui.Checkbox('Group sharing over actors', st.share)
@@ -1701,6 +1792,7 @@ end
 
 -- Test hooks for the meter scope (see tests/test_meter_scope.lua).
 function UI.inGroupScope(row) return inGroupScope(row) end
+function UI.pieSlices(rows, maxSlices) return pieSlices(rows, maxSlices) end
 function UI.setGroupOnly(v) S.settings.groupOnly = v and true or false end
 function UI.groupOnly() return S.settings.groupOnly end
 
@@ -1796,6 +1888,7 @@ function UI.loadPrefs()
     end
     if p.hist_mode then S.histMode = p.hist_mode end
     if p.mini then S.mini = (p.mini == '1') end
+    if p.mini_pie then S.miniPie = (p.mini_pie == '1') end
     -- settings
     local st = S.settings
     if p.set_timeout then st.timeout = tonumber(p.set_timeout) or st.timeout end
@@ -1834,6 +1927,8 @@ function UI.savePrefs()
     if ss ~= S._savedSort then S.db:setPref('fight_sort', ss); S._savedSort = ss end
     local mv = S.mini and '1' or '0'
     if mv ~= S._savedMini then S.db:setPref('mini', mv); S._savedMini = mv end
+    local pv = S.miniPie and '1' or '0'
+    if pv ~= S._savedMiniPie then S.db:setPref('mini_pie', pv); S._savedMiniPie = pv end
     -- settings (only write on change)
     local st = S.settings
     local sig = table.concat({ st.timeout, st.retentionDays, st.miniRows, st.share and 1 or 0, st.groupOnly and 1 or 0 }, ',')
@@ -1880,6 +1975,10 @@ local function drawMini()
             if ImGui.IsItemClicked(0) then S.miniMode = 'hps' end
             ImGui.SameLine(0, 6); ctext('fgFaint', '|')
             scopeToggle(6)
+            ImGui.SameLine(0, 6); ctext('fgFaint', '|')
+            ImGui.SameLine(0, 6); ctext(S.miniPie and 'gold' or 'fgFaint', 'pie')
+            if ImGui.IsItemClicked(0) then S.miniPie = not S.miniPie end
+            if ImGui.IsItemHovered() then ImGui.SetTooltip('Show/hide the share pie under the bars') end
             rightText('fgFaint', mmss(snap.duration) .. (snap.live and '' or ' [end]'))
             ImGui.Separator()
 
@@ -1942,6 +2041,12 @@ local function drawMini()
                 ctext('fgFaint', pct .. '%  ' .. fmtK(s.total))
                 local w = ImGui.GetContentRegionAvail()
                 drawBar(s.mine and 'you' or (s.isPet and 'pet' or barColor), s.total / top, 4, w)
+            end
+            if S.miniPie and #rows > 0 then
+                ImGui.Separator()
+                local w = ImGui.GetContentRegionAvail()
+                local r = math.max(24, math.min(40, math.floor(w / 5)))
+                drawPie(pieSlices(rows, 6), r, w)
             end
             if not hps and (snap.incoming or 0) > 0 then
                 ImGui.Separator()
