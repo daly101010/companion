@@ -187,7 +187,7 @@ function DB.new(path)
         return nil
     end
     db:busy_timeout(750)
-    local self = setmetatable({ _db = db, _sessionId = nil, _path = path }, DB)
+    local self = setmetatable({ _db = db, _sessionId = nil, _path = path, _eventQueue = {} }, DB)
     self:_exec(SCHEMA)
     -- migrations for DBs created before a column existed
     self:_ensureColumn('fight_ability', 'is_pet', 'INTEGER NOT NULL DEFAULT 0')
@@ -465,25 +465,15 @@ function DB:saveFight(fight)
         end
     end
 
-    local es = self:_prepare([[
-        INSERT INTO event(fight_id, t, source, target, ability, kind, amount, crit, outcome)
-        VALUES(?,?,?,?,?,?,?,?,?);
-    ]])
-    if es then
-        for _, e in ipairs(fight.events or {}) do
-            es:bind(1, fightId)
-            es:bind(2, e.t)
-            es:bind(3, e.source)
-            es:bind(4, e.target)
-            es:bind(5, e.ability)
-            es:bind(6, e.kind)
-            es:bind(7, e.amount)
-            es:bind(8, b(e.crit))
-            es:bind(9, e.outcome)
-            es:step(); es:reset()
-        end
-        es:finalize()
+    -- Raw events: the death/kill markers (a handful; recentDeaths' legacy
+    -- path reads kind='death') go in this transaction, the bulk is queued and
+    -- drained in slices by DB:drainEvents from the main loop -- see there.
+    local markers, deferred = {}, {}
+    for _, e in ipairs(fight.events or {}) do
+        if e.kind == 'death' or e.kind == 'kill' then markers[#markers + 1] = e
+        else deferred[#deferred + 1] = e end
     end
+    self:_insertEvents(fightId, markers, 1, #markers)
 
     -- death post-mortem records: one `death` row + its black-box samples
     local okDeaths, deathErr = pcall(function()
@@ -526,7 +516,95 @@ function DB:saveFight(fight)
         self:_exec("ROLLBACK;")
         return nil
     end
+    if #deferred > 0 then
+        self._eventQueue[#self._eventQueue + 1] = { fightId = fightId, events = deferred, pos = 1 }
+    end
     return fightId
+end
+
+-- Insert events[from..to] for a fight. Caller owns the transaction.
+function DB:_insertEvents(fightId, events, from, to)
+    if to < from then return end
+    local es = self:_prepare([[
+        INSERT INTO event(fight_id, t, source, target, ability, kind, amount, crit, outcome)
+        VALUES(?,?,?,?,?,?,?,?,?);
+    ]])
+    if not es then return end
+    for i = from, to do
+        local e = events[i]
+        es:bind(1, fightId)
+        es:bind(2, e.t)
+        es:bind(3, e.source)
+        es:bind(4, e.target)
+        es:bind(5, e.ability)
+        es:bind(6, e.kind)
+        es:bind(7, e.amount)
+        es:bind(8, b(e.crit))
+        es:bind(9, e.outcome)
+        es:step(); es:reset()
+    end
+    es:finalize()
+end
+
+-- ── deferred event writes ──────────────────────────────────────────────
+-- saveFight used to insert up to 4000 event rows inside the fight's
+-- transaction: a visible hitch the moment a long fight closed, and a write
+-- lock every other boxed client waited on. The fight row and its rollups
+-- still commit at once (the history list is right immediately); the raw
+-- events sit in self._eventQueue and drainEvents writes `maxRows` of them
+-- per call from the main loop, each slice its own short transaction.
+-- fightEvents() flushes the fight it is asked for first, so a detail view or
+-- post-mortem never sees a half-written log; close() flushes everything.
+
+-- One BEGIN IMMEDIATE attempt, no retry sleep: a slice that loses the lock
+-- just runs next tick.
+function DB:_tryBegin()
+    local res = self._db:exec("BEGIN IMMEDIATE TRANSACTION;")
+    if res == sqlite.OK then return true end
+    if res ~= sqlite.BUSY then
+        printf('\ar[companion] db begin error (%d): %s', res, self._db:errmsg())
+    end
+    return false
+end
+
+---@return boolean  true while queued events remain
+function DB:eventsPending() return #self._eventQueue > 0 end
+
+-- Write up to maxRows queued events (default 400). Returns true while more remain.
+---@param maxRows integer|nil
+---@return boolean more
+function DB:drainEvents(maxRows)
+    local job = self._eventQueue[1]
+    if not job then return false end
+    maxRows = maxRows or 400
+    if not self:_tryBegin() then return true end
+    local to = math.min(#job.events, job.pos + maxRows - 1)
+    self:_insertEvents(job.fightId, job.events, job.pos, to)
+    if not self:_exec("COMMIT;") then
+        self:_exec("ROLLBACK;")
+        return true -- slice failed; keep it and retry next tick
+    end
+    job.pos = to + 1
+    if job.pos > #job.events then table.remove(self._eventQueue, 1) end
+    return #self._eventQueue > 0
+end
+
+-- Drain everything, or just up to and including `fightId`'s job.
+---@param fightId integer|nil
+function DB:flushEvents(fightId)
+    local guard = 0
+    while #self._eventQueue > 0 and guard < 10000 do
+        guard = guard + 1
+        if fightId then
+            local found = false
+            for _, j in ipairs(self._eventQueue) do if j.fightId == fightId then found = true end end
+            if not found then return end
+        end
+        if not self:drainEvents(4000) and #self._eventQueue > 0 then
+            -- BUSY: another client holds the lock; wait briefly and retry
+            mq.delay(50)
+        end
+    end
 end
 
 -- Most recent fights (newest first), joined with nothing else.
@@ -828,6 +906,7 @@ end
 
 ---@param fightId integer
 function DB:fightEvents(fightId)
+    self:flushEvents(fightId) -- a queued log for this fight lands first
     local stmt = self:_prepare([[
         SELECT t, source, target, ability, kind, amount, crit, outcome
         FROM event WHERE fight_id=? ORDER BY t ASC;
@@ -937,6 +1016,7 @@ end
 
 function DB:close()
     if self._db then
+        self:flushEvents()
         self:endSession()
         self._db:close()
         self._db = nil

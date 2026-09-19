@@ -52,6 +52,16 @@ the mini window still work. The chosen mode persists, so it reopens the same way
     loops pass `needRefresh`) to serve a just-finished fight immediately.
   Anything reading `S.hist.*` from outside render must cope with a cold cache —
   see `UI.exportDeath()`, which queries the DB directly when the list is empty.
+- **Fight saves are split.** `DB:saveFight` commits the fight row, rollups,
+  casts, decisions, deaths and only the `death`/`kill` marker events in one
+  transaction; the bulk of the raw events goes to `DB._eventQueue` and
+  `DB:drainEvents(400)` writes a slice per main-loop tick, each its own short
+  transaction (`_tryBegin`: one attempt, no retry sleep). `DB:fightEvents(id)`
+  flushes that fight's job first and `DB:close()` flushes everything, so a
+  detail view, post-mortem or shutdown never sees a partial log. `pruneEvents`
+  is likewise sliced (2000 rows/call, `idx_fight_ended`, id watermark) and the
+  loops re-call it every tick while it reports leftovers. Test:
+  `luajit tests/test_db_queue.lua` (fake lsqlite3).
 - **`event` needs `idx_event_kind_fight`** (`kind, fight_id`). `recentDeaths` looks
   for ~400 `kind='death'` rows among millions; without it SQLite walks every event
   row of every fight (measured 165ms → 0.4ms on a 9M-row DB). It is built by

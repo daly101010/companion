@@ -171,6 +171,7 @@ function M.tick()
         needRefresh = true
     end
 
+    db:drainEvents(400) -- a slice of the last fight's queued event rows (see db.lua)
     local t = mq.gettime()
     if (t - lastRaid) > 5000 then
         UI.setRaidRoster(readers.raid())

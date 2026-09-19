@@ -228,6 +228,7 @@ while running and mq.TLO.MacroQuest.GameState() == 'INGAME' do
         needRefresh = true
     end
 
+    db:drainEvents(400) -- a slice of the last fight's queued event rows (see db.lua)
     local t = mq.gettime()
     if (t - lastRaid) > 5000 then -- raid roster for the meter's raid scope
         UI.setRaidRoster(readers.raid())
