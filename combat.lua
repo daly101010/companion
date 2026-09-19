@@ -129,6 +129,8 @@ local function newEncounter()
         hpAnchorPct = nil, -- last sampled HP% of the primary target
         hpAnchorDmg = 0,   -- damage dealt to that target at the anchor sample
         hpEst       = { sum = 0, weight = 0, target = nil }, -- weighted max-HP estimate
+        hpTrail     = {},  -- last 30s of { t = ms, pct } samples of the primary target (time-to-kill)
+        hpMinPct    = nil, -- lowest HP% seen on the primary target (attempt tracking)
         hpLastSample = nil, -- gettime() of the last 1Hz HP sample (per-encounter,
                              -- so a fresh encounter never inherits a prior one's throttle)
     }
@@ -497,6 +499,7 @@ local function buildFight(enc)
         overheal       = enc.overheal,
         mob_max_hp     = (enc.hpEst.weight > 0) and (enc.hpEst.sum / enc.hpEst.weight) or nil,
         mob_hp_weight  = enc.hpEst.weight,
+        mob_min_hp     = enc.hpMinPct, -- lowest primary-target HP% seen (attempt tracking)
         abilities      = abilities,
         casts          = buildCasts(enc),
         events         = enc.events,
@@ -1040,6 +1043,7 @@ function sampleMobHp()
     pct = ok and tonumber(pct) or nil
     if not pct then return end
     local dmg = enc.targets[name] or 0
+    M.trackHp(enc, name, pct, t)
     if enc.hpAnchorPct == nil or enc.hpEst.target ~= name or pct > enc.hpAnchorPct + 2 then
         -- (re)anchor: first sample of the encounter, primary target switched, or
         -- HP% rose more than 2% (heal/regen). Always anchor at the CURRENT
@@ -1063,6 +1067,40 @@ function sampleMobHp()
         enc.hpEst.weight = enc.hpEst.weight + drop
     end
     enc.hpAnchorPct, enc.hpAnchorDmg = pct, dmg
+end
+
+-- ── time-to-kill ──────────────────────────────────────────────────────
+-- Keep the last TTK_WINDOW ms of (t, pct) samples of the primary target. A
+-- target switch or an HP rise > 2% (heal, regen) restarts the trail so a stale
+-- slope never survives; hpMinPct tracks the lowest reading for attempt
+-- tracking (persisted as fight.mob_min_hp).
+M.TTK_WINDOW = 30000
+M.TTK_MIN_SPAN = 5000
+function M.trackHp(enc, name, pct, t)
+    local trail = enc.hpTrail
+    if not trail then return end
+    local last = trail[#trail]
+    if #trail > 0 and (enc.hpTrailTarget ~= name or pct > last.pct + 2) then
+        for i = #trail, 1, -1 do trail[i] = nil end
+    end
+    if enc.hpTrailTarget ~= name then enc.hpTrailTarget, enc.hpMinPct = name, nil end
+    trail[#trail + 1] = { t = t, pct = pct }
+    while #trail > 1 and (t - trail[1].t) > M.TTK_WINDOW do table.remove(trail, 1) end
+    if enc.hpMinPct == nil or pct < enc.hpMinPct then enc.hpMinPct = pct end
+end
+
+-- Seconds until the primary target reaches 0% at the trail's average rate, or
+-- nil when the trail is too short (< TTK_MIN_SPAN) or HP is not falling.
+-- Returns ttkSec|nil, currentPct|nil, pctPerSec.
+function M.ttkEstimate(enc)
+    local trail = enc.hpTrail
+    if not trail or #trail == 0 then return nil, nil, 0 end
+    local first, last = trail[1], trail[#trail]
+    local span = last.t - first.t
+    if #trail < 2 or span < M.TTK_MIN_SPAN then return nil, last.pct, 0 end
+    local rate = (first.pct - last.pct) / (span / 1000) -- %/s
+    if rate <= 0 then return nil, last.pct, rate end
+    return last.pct / rate, last.pct, rate
 end
 
 -- Snapshot the fight to display: the live encounter if any, else the last one.
@@ -1190,6 +1228,9 @@ local function buildSnapshot(enc, live, fixedDuration, nameOverride)
         healTotal  = enc.healTotal,
         overheal   = enc.overheal,
         eventCount = #enc.events,
+        targetPct  = (function() local _, p = M.ttkEstimate(enc) return p end)(),
+        ttk        = (M.ttkEstimate(enc)),
+        mobMinPct  = enc.hpMinPct,
         sources    = sources,
         abilities  = abilities,
         abilitiesBySource = bySource,

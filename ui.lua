@@ -937,6 +937,14 @@ local function drawLive()
         rightText('gold', comma(snap.dps))
         ctext('fgDim', string.format('%s  %s', snap.zone ~= '' and snap.zone or 'unknown zone', mmss(snap.duration)))
         ImGui.SameLine(); ctext('fgFaint', snap.live and '  [LIVE]' or '  [ended]')
+        if snap.live and snap.targetPct then
+            -- primary target HP + time-to-kill from the last 30s of HP samples
+            ImGui.SameLine(0, 8); ctext('enemy', string.format('%d%%', math.floor(snap.targetPct + 0.5)))
+            if snap.ttk then
+                ImGui.SameLine(0, 4); ctext('fgFaint', '~' .. mmss(snap.ttk) .. ' to kill')
+                if ImGui.IsItemHovered() then ImGui.SetTooltip('Estimated from the target HP slope over the last 30s') end
+            end
+        end
         ImGui.SameLine(0, 8); ctext(not overall and 'gold' or 'fgFaint', 'Fight')
         if ImGui.IsItemClicked(0) then S.liveScope = 'fight' end
         ImGui.SameLine(0, 6); ctext(overall and 'gold' or 'fgFaint', 'Overall')
@@ -2299,7 +2307,13 @@ local function drawMini()
             ImGui.SameLine(0, 6); ctext(S.miniPie and 'gold' or 'fgFaint', 'pie')
             if ImGui.IsItemClicked(0) then S.miniPie = not S.miniPie end
             if ImGui.IsItemHovered() then ImGui.SetTooltip('Show/hide the share pie under the bars') end
-            rightText('fgFaint', mmss(snap.duration) .. (snap.live and '' or ' [end]'))
+            local right = mmss(snap.duration) .. (snap.live and '' or ' [end]')
+            if snap.live and snap.targetPct then
+                -- target HP% and time-to-kill ahead of the clock
+                right = string.format('%d%%%s  %s', math.floor(snap.targetPct + 0.5),
+                    snap.ttk and (' ~' .. mmss(snap.ttk)) or '', right)
+            end
+            rightText('fgFaint', right)
             ImGui.Separator()
 
             local barColor = hps and 'green' or 'gold'
