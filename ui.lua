@@ -263,9 +263,20 @@ local function petOwner(name)
     return tostring(name or ''):match("^(.-)[`']s %a+$")
 end
 
+-- Lowercased set of fresh companion peers' names. Built once per scope pass
+-- (not once per pet row -- freshPeers allocates and walks the peer table).
+local function peerSet()
+    local set = {}
+    if S.group then
+        for _, p in ipairs(S.group.freshPeers()) do set[tostring(p.player or ''):lower()] = true end
+    end
+    return set
+end
+
 -- Does this meter row belong to my group? row = { name, mine?, peer? }.
+-- `peers` is a peerSet() (built by the caller; made here when omitted).
 -- Exposed as UI.inGroupScope for the test.
-local function inGroupScope(row)
+local function inGroupScope(row, peers)
     if row.mine or row.peer then return true end
     local name = tostring(row.name or ''):lower()
     local me = tostring(S.playerName or ''):lower()
@@ -274,11 +285,7 @@ local function inGroupScope(row)
     if owner then
         owner = owner:lower()
         if owner == me or S.roster[owner] then return true end
-        if S.group then
-            for _, p in ipairs(S.group.freshPeers()) do
-                if tostring(p.player or ''):lower() == owner then return true end
-            end
-        end
+        if (peers or peerSet())[owner] then return true end
     end
     return false
 end
@@ -286,8 +293,9 @@ end
 -- Apply the meter scope to an array of rows (returns the same array when off).
 local function scopeRows(rows)
     if not S.settings.groupOnly then return rows end
+    local peers = peerSet()
     local out = {}
-    for _, r in ipairs(rows) do if inGroupScope(r) then out[#out + 1] = r end end
+    for _, r in ipairs(rows) do if inGroupScope(r, peers) then out[#out + 1] = r end end
     return out
 end
 
@@ -2103,6 +2111,62 @@ function UI.retentionDays() return S.settings.retentionDays or 14 end
 -- Compact group meter: a ranked DPS row per contributor in the current fight.
 -- Fixed/resizable (a stretch meter needs a defined width, so not auto-resize).
 -- Double-click to expand to the full window.
+-- Mini meter rows: my parse merged with peers' first-person broadcasts
+-- (peers are authoritative for themselves; my rows stay from my parse; others
+-- I only see third-person fill the rest), scoped and ranked. Cached per
+-- snapshot object / mode / scope and refreshed at most every 500ms so peer
+-- broadcasts (~1 Hz) still land -- not rebuilt and re-sorted every frame.
+local miniCache = { rows = nil, snap = nil, hps = nil, scope = nil, t = -math.huge }
+local function miniRows(snap, hps)
+    local cache = miniCache
+    local scope = S.settings.groupOnly
+    local nowMs = mq.gettime()
+    if cache.rows and cache.snap == snap and cache.hps == hps and cache.scope == scope
+        and (nowMs - cache.t) < 500 then
+        return cache.rows
+    end
+    local byName, order = {}, {}
+    local function put(name, row)
+        if not byName[name] then order[#order + 1] = name end
+        byName[name] = row
+    end
+    if hps then
+        for _, h in ipairs(snap.healSources or {}) do
+            put(h.name, { name = h.name, total = h.total, rate = h.hps, mine = h.mine })
+        end
+        if S.group then
+            for _, p in ipairs(S.group.freshPeers()) do
+                if (p.healTotal or 0) > 0 then
+                    put(p.player, { name = p.player, total = p.healTotal, rate = p.healDps, peer = true })
+                end
+            end
+        end
+    else
+        for _, s in ipairs(snap.sources) do
+            put(s.name, { name = s.name, total = s.total, rate = s.dps, mine = s.mine, isPet = s.isPet })
+        end
+        if S.group then
+            for _, p in ipairs(S.group.freshPeers()) do
+                if (p.playerDmg or 0) > 0 then
+                    put(p.player, { name = p.player, total = p.playerDmg, rate = p.playerDps, peer = true })
+                end
+                if p.petName and p.petName ~= '' and (p.petDmg or 0) > 0 then
+                    put(p.petName, { name = p.petName, total = p.petDmg, rate = p.petDps, isPet = true, peer = true })
+                end
+            end
+        end
+    end
+    local rows = {}
+    for _, name in ipairs(order) do rows[#rows + 1] = byName[name] end
+    rows = scopeRows(rows)
+    table.sort(rows, function(a, b) return a.total > b.total end)
+    cache.rows, cache.snap, cache.hps, cache.scope, cache.t = rows, snap, hps, scope, nowMs
+    return rows
+end
+
+-- Test hook (see tests/test_meter_scope.lua).
+function UI.miniRows(snap, hps) return miniRows(snap, hps) end
+
 local function drawMini()
     ImGui.SetNextWindowSize(250, 230, ImGuiCond.FirstUseEver)
     local visible = ImGui.Begin('Companion##mini###CompanionMini', S.open, ImGuiWindowFlags.NoCollapse)
@@ -2137,45 +2201,8 @@ local function drawMini()
             rightText('fgFaint', mmss(snap.duration) .. (snap.live and '' or ' [end]'))
             ImGui.Separator()
 
-            -- merge my parse with peers' first-person broadcasts (peers are
-            -- authoritative for themselves; my rows stay from my parse; others
-            -- I only see third-person fill the rest).
-            local byName, order = {}, {}
-            local function put(name, row)
-                if not byName[name] then order[#order + 1] = name end
-                byName[name] = row
-            end
             local barColor = hps and 'green' or 'gold'
-            if hps then
-                for _, h in ipairs(snap.healSources or {}) do
-                    put(h.name, { name = h.name, total = h.total, rate = h.hps, mine = h.mine })
-                end
-                if S.group then
-                    for _, p in ipairs(S.group.freshPeers()) do
-                        if (p.healTotal or 0) > 0 then
-                            put(p.player, { name = p.player, total = p.healTotal, rate = p.healDps, peer = true })
-                        end
-                    end
-                end
-            else
-                for _, s in ipairs(snap.sources) do
-                    put(s.name, { name = s.name, total = s.total, rate = s.dps, mine = s.mine, isPet = s.isPet })
-                end
-                if S.group then
-                    for _, p in ipairs(S.group.freshPeers()) do
-                        if (p.playerDmg or 0) > 0 then
-                            put(p.player, { name = p.player, total = p.playerDmg, rate = p.playerDps, peer = true })
-                        end
-                        if p.petName and p.petName ~= '' and (p.petDmg or 0) > 0 then
-                            put(p.petName, { name = p.petName, total = p.petDmg, rate = p.petDps, isPet = true, peer = true })
-                        end
-                    end
-                end
-            end
-            local rows = {}
-            for _, name in ipairs(order) do rows[#rows + 1] = byName[name] end
-            rows = scopeRows(rows)
-            table.sort(rows, function(a, b) return a.total > b.total end)
+            local rows = miniRows(snap, hps)
 
             local top = (rows[1] and rows[1].total) or 1
             local grand = 0

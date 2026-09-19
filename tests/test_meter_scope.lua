@@ -64,5 +64,26 @@ UI.setGroupOnly(false)
 UI.loadPrefs()
 check('loadPrefs restores it', UI.groupOnly() == true)
 
+-- ── mini meter rows: merged, scoped, cached per snapshot/mode/scope ──
+UI.setRoster({ 'Healbot' })
+peers = { { player = 'Boxmage', playerDmg = 500, playerDps = 50, petName = 'Xarn', petDmg = 100, petDps = 10, healTotal = 0 } }
+local snap = { sources = {
+  { name = 'Tester', total = 900, dps = 90, mine = true },
+  { name = 'Boxmage', total = 10, dps = 1 },       -- my third-person estimate; peer report wins
+  { name = 'Randomdude', total = 700, dps = 70 },
+}, healSources = {} }
+UI.setGroupOnly(false)
+local rows = UI.miniRows(snap, false)
+check('peer overrides third-person row', rows[3] and rows[3].name == 'Boxmage' and rows[3].total == 500 and rows[3].peer)
+check('ranked by total', rows[1].name == 'Tester' and rows[2].name == 'Randomdude' and rows[4].name == 'Xarn')
+check('same snapshot -> same table (cached)', UI.miniRows(snap, false) == rows)
+UI.setGroupOnly(true)
+local scoped = UI.miniRows(snap, false)
+check('scope change rebuilds', scoped ~= rows)
+check('scoped drops the stranger', #scoped == 3 and scoped[3].name == 'Xarn')
+check('mode change rebuilds', UI.miniRows(snap, true) ~= scoped)
+check('new snapshot rebuilds', UI.miniRows({ sources = {}, healSources = {} }, false) ~= scoped)
+UI.setGroupOnly(false)
+
 io.write(string.format('\n%d passed, %d failed\n', pass, fail))
 os.exit(fail == 0 and 0 or 1)
