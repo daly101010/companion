@@ -6,7 +6,9 @@ jmoyers.github.io/everquest-companion). Runs on emu servers where MQ is allowed.
 
 Run: `/lua run companion` (add `mini`/`full`/`hide` to launch straight into that
 mode, e.g. `/lua run companion mini`) · toggle: `/companion` · **compact meter:
-`/companion mini`** (double-click the mini window to expand) · quit: `/companion stop`
+`/companion mini`** (double-click the mini window to expand) · exports:
+`/companion export` (fight), `/companion export run` (zone run), `/companion death`
+· quit: `/companion stop`
 
 Two window modes share one render callback (`ui.lua`): `drawFull` (tabbed research
 console) and `drawMini` (auto-sizing DPS meter, own window id `###CompanionMini`).
@@ -222,8 +224,12 @@ into `S.selRun`, and the fights list shows only that run. The right panel shows
 `drawRunSummary` (totals, everyone's damage list + pie, targets table) while
 `S.runView` is set; clicking a fight clears it, `[totals]` restores it. The
 current session's run is reloaded on every `force` refresh so an open instance
-keeps accumulating; `S.hist.sessionId` marks it `now` in the table. Test:
-`luajit tests/test_zone_runs.lua`.
+keeps accumulating; `S.hist.sessionId` marks it `now` in the table.
+**Run export**: `[export]` on the summary or `/companion export run`
+(`UI.exportRun`, falls back to the most recent run from the DB; `Service.exportRun`
+for hosts) builds `ui.lua:runExportCtx` and `Export.exportRun` writes
+`companion_run_<char>_<ts>.txt` + a one-liner to console. Tests:
+`luajit tests/test_zone_runs.lua`, `tests/test_export_run.lua`.
 
 ## Attempts + time-to-kill
 

@@ -176,6 +176,8 @@ mq.bind('/companion', function(arg)
         running = false
     elseif arg == 'mini' then
         UI.toggleMini()
+    elseif arg == 'export run' or arg == 'exportrun' then
+        UI.exportRun()
     elseif arg == 'export' then
         UI.exportLive()
     elseif arg == 'death' then

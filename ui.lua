@@ -1278,6 +1278,48 @@ local function attemptText(t)
     return table.concat(parts, ', ')
 end
 
+-- Export context for a loaded zone run (S.selRun shape). Pure over cached
+-- data -- exposed as UI.runExportCtx for the test.
+local function runExportCtx(sr)
+    local r = sr.run
+    local combat = r.combat_sec or 0
+    local sources = {}
+    for _, row in ipairs(sr.sources or {}) do
+        sources[#sources + 1] = { name = row.source, total = row.total or 0,
+            dps = combat > 0 and (row.total or 0) / combat or 0 }
+    end
+    table.sort(sources, function(a, b) return a.total > b.total end)
+    local attempts = sr.attempts or attemptsByTarget(sr.fights)
+    local targets = {}
+    for _, t in ipairs(sr.targets or {}) do
+        targets[#targets + 1] = { mob = t.mob, fights = t.fights, total_dmg = t.total_dmg, avg_dps = t.avg_dps,
+            attempts = attemptText(attempts[t.mob or 'combat']) }
+    end
+    local fightList = {}
+    local chrono = {}
+    for _, f in ipairs(sr.fights or {}) do chrono[#chrono + 1] = f end
+    table.sort(chrono, function(a, b) return (a.id or 0) < (b.id or 0) end)
+    for _, f in ipairs(chrono) do
+        local at = attempts[f.primary_target or 'combat']
+        local a = at and at.byFight[f.id]
+        local tag = ''
+        if a and (at.attempts > 1 or f.is_raid == 1) then
+            tag = a.killed and ('#' .. a.n .. ' kill')
+                or ('#' .. a.n .. (f.mob_min_hp and string.format(' wipe %d%%', math.floor(f.mob_min_hp + 0.5)) or ' wipe'))
+        end
+        fightList[#fightList + 1] = { started_at = f.started_at, target = f.primary_target, duration = f.duration,
+            dps = f.dps, total_dmg = f.total_dmg, tag = tag }
+    end
+    return {
+        zone = zoneLabel(r.zone), started_at = r.started_at, ended_at = r.ended_at, fights = r.fights or 0,
+        combat_sec = combat, wall_sec = math.max(0, (r.ended_at or 0) - (r.started_at or 0)),
+        total_dmg = r.total_dmg or 0, mine = (r.player_dmg or 0) + (r.pet_dmg or 0),
+        incoming = r.incoming or 0, deaths = r.deaths or 0, heal_total = r.heal_total or 0,
+        dps = runDps(r), is_raid = (r.is_raid or 0) == 1,
+        sources = sources, targets = targets, fightList = fightList,
+    }
+end
+
 -- Right-panel summary of one zone run: totals, everyone's damage over the
 -- whole run (list + pie) and what was fought. Reads S.selRun only.
 local function drawRunSummary(sr)
@@ -1286,6 +1328,10 @@ local function drawRunSummary(sr)
     local wall = math.max(0, (r.ended_at or 0) - (r.started_at or 0))
     cardHeader('Zone run - ' .. zoneLabel(r.zone),
         string.format('%d fights  %s dps', r.fights or 0, comma(runDps(r))))
+    ctext('gold', '[export]')
+    if ImGui.IsItemClicked(0) then Export.exportRun(runExportCtx(sr), S.playerName) end
+    if ImGui.IsItemHovered() then ImGui.SetTooltip('Report file + one-liner to console (/companion export run)') end
+    ImGui.SameLine(0, 10)
     ctext('fgDim', string.format('%s - %s   wall %s   combat %s',
         os.date('%b %d %H:%M', r.started_at or 0), os.date('%H:%M', r.ended_at or 0), mmss(wall), mmss(combat)))
     if (r.is_raid or 0) == 1 then ImGui.SameLine(0, 6); ctext('gold', '[RAID]') end
@@ -1349,6 +1395,22 @@ local function drawRunSummary(sr)
         ImGui.EndTable()
     end
     ctext('fgFaint', 'Click a fight on the left for its own breakdown; [totals] brings this back.')
+end
+
+-- /companion export run: export the selected zone run, or the most recent
+-- one. Runs in the main loop, so loading it from the DB here is legal.
+function UI.exportRun()
+    local sr = S.selRun
+    if not sr and S.db then
+        local r = S.db:zoneRuns(1)[1]
+        if r then
+            local id, zone = r.session_id, r.zone or ''
+            sr = { run = r, fights = S.db:runFights(id, zone),
+                sources = S.db:runSources(id, zone), targets = S.db:runTargets(id, zone) }
+        end
+    end
+    if not sr then printf('\ay[companion]\ax no zone run recorded.'); return end
+    Export.exportRun(runExportCtx(sr), S.playerName)
 end
 
 local function drawHistory()
@@ -2043,7 +2105,7 @@ local function drawSettings()
         S._win = { x = 60, y = 60, w = 900, h = 560 }; S._winApply = true
     end
     ImGui.Dummy(0, 6)
-    ctext('fgFaint', 'Commands: /companion  /companion mini  /companion export  /companion death  /companion reset  /companion stop')
+    ctext('fgFaint', 'Commands: /companion  /companion mini  /companion export  /companion export run  /companion death  /companion reset  /companion stop')
 
     local sh = S.smartheal
     if sh and (sh.unknown or 0) > 0 then
@@ -2099,6 +2161,7 @@ end
 function UI.inGroupScope(row) return inScope(row, 'group') end
 function UI.histSources(sel) return histSources(sel) end
 function UI.attemptsByTarget(fights) return attemptsByTarget(fights) end
+function UI.runExportCtx(sr) return runExportCtx(sr) end
 function UI.attemptText(t) return attemptText(t) end
 function UI.histDerived(sel, source) return histDerived(sel, source) end
 function UI.sourceEvents(snap, source) return sourceEvents(snap, source) end

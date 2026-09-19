@@ -158,4 +158,82 @@ function M.runDeath(verdict, row, playerName)
     return path
 end
 
+-- ── zone run ─────────────────────────────────────────────────────────
+-- ctx (assembled by ui.lua:runExportCtx from S.selRun):
+--   { zone, started_at, ended_at, fights, combat_sec, wall_sec, total_dmg,
+--     mine, incoming, deaths, heal_total, dps, is_raid,
+--     sources=[{name,total,dps}], targets=[{mob,fights,total_dmg,avg_dps,attempts}],
+--     fightList=[{started_at,target,duration,dps,total_dmg,tag}] }
+
+---@param ctx table
+---@return string  one line for chat
+function M.runCompact(ctx)
+    local top = {}
+    for i, s in ipairs(ctx.sources or {}) do
+        if i > 3 then break end
+        top[#top + 1] = s.name .. ' ' .. comma(s.dps)
+    end
+    return string.format('[Companion] %s %s: %d fights, %s combat, %s dps%s',
+        ctx.zone or 'run', os.date('%m/%d', ctx.started_at or os.time()), ctx.fights or 0,
+        mmss(ctx.combat_sec), comma(ctx.dps),
+        #top > 0 and (', top: ' .. table.concat(top, ', ')) or '')
+end
+
+---@param ctx table
+---@return string  full multi-line report
+function M.runReport(ctx)
+    local L = {}
+    local function line(s) L[#L + 1] = s end
+    line(('== Companion zone run: %s (%s - %s%s) =='):format(ctx.zone or 'run',
+        os.date('%Y-%m-%d %H:%M', ctx.started_at or 0), os.date('%H:%M', ctx.ended_at or 0),
+        ctx.is_raid and ', raid' or ''))
+    line(('%d fights   wall %s   combat %s   %s dps'):format(ctx.fights or 0, mmss(ctx.wall_sec),
+        mmss(ctx.combat_sec), comma(ctx.dps)))
+    local total = ctx.total_dmg or 0
+    line(('%s damage   you+pet %s (%d%%)   taken %s   deaths %d   healed %s'):format(
+        fmtK(total), fmtK(ctx.mine), total > 0 and math.floor((ctx.mine or 0) / total * 100 + 0.5) or 0,
+        fmtK(ctx.incoming), ctx.deaths or 0, fmtK(ctx.heal_total)))
+    line('')
+    line('Damage by source:')
+    for i, s in ipairs(ctx.sources or {}) do
+        line(('  %2d. %-22s %10s  %s dps'):format(i, s.name, fmtK(s.total), comma(s.dps)))
+    end
+    if ctx.targets and #ctx.targets > 0 then
+        line('')
+        line('Targets:')
+        for _, t in ipairs(ctx.targets) do
+            line(('  %-22s %3dx %10s  %s avg dps%s'):format(t.mob or 'combat', t.fights or 0, fmtK(t.total_dmg),
+                comma(t.avg_dps), (t.attempts and t.attempts ~= '') and ('  ' .. t.attempts) or ''))
+        end
+    end
+    if ctx.fightList and #ctx.fightList > 0 then
+        line('')
+        line('Fights:')
+        for _, f in ipairs(ctx.fightList) do
+            line(('  %s  %-22s %6s %8s dps %10s%s'):format(os.date('%H:%M', f.started_at or 0), f.target or 'combat',
+                mmss(f.duration), comma(f.dps), fmtK(f.total_dmg), (f.tag and f.tag ~= '') and ('  ' .. f.tag) or ''))
+        end
+    end
+    return table.concat(L, '\n')
+end
+
+function M.saveRun(text, playerName)
+    local path = string.format('%s/companion_run_%s_%s.txt', mq.configDir, playerName or 'me', os.date('%Y%m%d-%H%M%S'))
+    local f = io.open(path, 'w')
+    if not f then
+        printf('\ar[companion]\ax could not write run report to %s', path)
+        return nil
+    end
+    f:write(text); f:close()
+    return path
+end
+
+-- Full run export: report file + compact line to console.
+function M.exportRun(ctx, playerName)
+    local path = M.saveRun(M.runReport(ctx), playerName)
+    printf('\ag[companion]\ax %s', M.runCompact(ctx))
+    if path then printf('\ag[companion]\ax full report: \ay%s\ax', path) end
+    return path
+end
+
 return M

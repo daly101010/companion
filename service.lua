@@ -149,6 +149,10 @@ function M.exportLive()
     if M.enabled then UI.exportLive() end
 end
 
+function M.exportRun()
+    if M.enabled then UI.exportRun() end
+end
+
 function M.exportDeath()
     if M.enabled then UI.exportDeath() end
 end
