@@ -16,6 +16,27 @@ G.actor           = nil
 G.enabled         = false -- actors available AND user hasn't disabled sharing
 G.on              = true  -- user setting
 
+G.onPeerEvent     = nil   -- fn(payload) set by the host: a peer's first-person event arrived
+
+-- Is `name` a fresh companion peer, or a fresh peer's pet ("<Peer>`s pet")?
+-- The recorder drops its own third-person parse of such sources and takes the
+-- peer's first-person events instead (exact, no double count).
+---@param name string
+---@return boolean
+function G.isFreshPeerSource(name)
+    if not G.on or not name then return false end
+    local n = tostring(name):lower()
+    local owner = n:match("^(.-)[`']s pet$")
+    local now = mq.gettime()
+    for who, p in pairs(G.peers) do
+        if (now - p.t) <= 6000 then
+            local w = tostring(who):lower()
+            if w == n or (owner and w == owner) then return true end
+        end
+    end
+    return false
+end
+
 -- Enable/disable sharing at runtime (Settings panel).
 function G.setEnabled(v)
     G.on = v and true or false
@@ -66,10 +87,15 @@ function G.init(playerName)
             target = c.target, live = c.live, t = mq.gettime(),
         }
     end)
-    -- Event mailbox: registered as a no-op receiver so send() has a valid
-    -- endpoint. Consumers register their own actors.register(EVENT_MAILBOX, ...)
+    -- Event mailbox: our receiver hands peers' events to G.onPeerEvent (the
+    -- recorder ingest, see combat.ingestPeerEvent); our own echo is dropped.
+    -- Other consumers register their own actors.register(EVENT_MAILBOX, ...)
     -- in their own scripts; each script gets its own callback dispatch.
-    G.eventActor = actors.register(EVENT_MAILBOX, function() end)
+    G.eventActor = actors.register(EVENT_MAILBOX, function(message)
+        local c = message()
+        if type(c) ~= 'table' or c.id ~= 'evt' or c.sender == G.me then return end
+        if G.on and G.onPeerEvent then pcall(G.onPeerEvent, c) end
+    end)
     G.enabled = G.actor ~= nil
 end
 

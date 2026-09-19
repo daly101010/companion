@@ -5,7 +5,8 @@ overlay in the **EQ Legends Companion** visual language (palette lifted 1:1 from
 jmoyers.github.io/everquest-companion). Runs on emu servers where MQ is allowed.
 
 Run: `/lua run companion` (add `mini`/`full`/`hide` to launch straight into that
-mode, e.g. `/lua run companion mini`) · toggle: `/companion` · **compact meter:
+mode, e.g. `/lua run companion mini`; `norecord` for a box that should not write
+the DB) · toggle: `/companion` · **compact meter:
 `/companion mini`** (double-click the mini window to expand) · exports:
 `/companion export` (fight), `/companion export run` (zone run), `/companion death`
 · quit: `/companion stop`
@@ -153,6 +154,28 @@ peer's event log or per-ability rows, so there's nothing deeper to expand.
 Sharing is user-toggleable at runtime via `G.setEnabled(bool)` (Settings tab →
 `G.on`); when off, `broadcast`/`freshPeers` no-op and peers clear.
 
+## One recorder, many boxes
+
+Every box used to parse and persist the same fight. Two switches change that:
+- **record** (Settings, pref `set_record`, launch args `norecord`/`record`;
+  `UI.recording()`): off means `db:setIdentity` only, no session row, so
+  `saveFight`/`snapshotXp` no-op; the loops also skip prune and XP snapshots.
+  Live meters, sharing and the (read-only) history keep working; the History
+  header says recording is off. Toggling it on at runtime opens the session
+  then (`db:sessionId()` check in the loops).
+- **peer ingest** (`Combat.ingestPeerEvent`, fed by `Group.onPeerEvent` from
+  the `companion_events` receiver in `group.lua`): a fresh peer's OWN
+  first-person hits/resists/heals (source = sender or `` <sender>`s pet ``; not
+  its relayed third-person lines, incoming, casts, kills) run through `record()`
+  with `fromPeer = true` (never re-broadcast). `record()` drops the local
+  third-person parse of any source `cb.isPeerSource` (= `Group.isFreshPeerSource`,
+  fresh within 6 s, name or pet) recognises, so a peer is counted exactly once
+  with its own numbers; a stale peer falls back to third-person. Casts stay
+  third-person (they never go through `record()`). Runs on every box (the live
+  view is the same everywhere); the recorder's DB thus holds every box's
+  per-ability rows. Tests: `luajit tests/test_peer_ingest.lua`,
+  `tests/test_peer_source.lua`.
+
 ## Settings (Settings tab)
 
 Runtime tunables live in `S.settings` and persist as `set_*` pref keys
@@ -162,6 +185,7 @@ Runtime tunables live in `S.settings` and persist as `set_*` pref keys
   only; fight/ability rollups are kept forever).
 - **miniRows** → `drawMini` row cap.
 - **share** → `Group.setEnabled` (group-sharing on/off).
+- **record** → `UI.recording()`; see "One recorder, many boxes".
 - **scope** → meter scope `all | group | raid` (`set_scope`; a legacy
   `set_grouponly=1` loads as `group`). Off `all`, the mini meter, the Live
   "Damage by source" card and the Healing tab's healer meter keep only rows that

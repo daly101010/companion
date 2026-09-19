@@ -46,7 +46,7 @@ local S     = {
     mini        = false, -- compact meter mode (just the current fight's DPS)
     miniMode    = 'dps', -- mini meter: 'dps' | 'hps'
     miniPie     = true,  -- mini meter: draw the damage-share pie under the bars
-    settings    = { timeout = 12, retentionDays = 14, share = true, miniRows = 12, scope = 'all' },
+    settings    = { timeout = 12, retentionDays = 14, share = true, miniRows = 12, scope = 'all', record = true },
     roster      = {},  -- lowercased names of my current group members (set by the main loop)
     raid        = {},  -- lowercased names of my current raid members (set by the main loop, ~5s)
     hist        = { fights = {}, best = nil, sessions = {}, xp = {}, session = nil },
@@ -1422,6 +1422,9 @@ local function drawHistory()
     ImGui.BeginChild('h_fights', leftW, 0, false)
     ImGui.BeginChild('h_fights_card', 0, 0, true)
 
+    if not S.settings.record then
+        ctext('resist', 'Recording is off on this character (Settings) - new fights are not saved here.')
+    end
     -- mode chips
     ctext(S.histMode == 'fights' and 'gold' or 'fgFaint', 'Fights')
     if ImGui.IsItemClicked(0) then S.histMode = 'fights' end
@@ -2086,6 +2089,12 @@ local function drawSettings()
     ctext('fgFaint', 'Damage (or healing) share pie under the mini meter bars; also the pie toggle on its header.')
     ImGui.Dummy(0, 4)
 
+    local rc, chr = ImGui.Checkbox('Record fights on this character', st.record)
+    if chr then st.record = rc end
+    ctext('fgFaint', 'Off: live meters and sharing keep working, but nothing is written to companion.db from this box.')
+    ctext('fgFaint', 'Turn it off on boxes; keep it on one recorder, which also takes peers\' first-person events.')
+    ImGui.Dummy(0, 4)
+
     local sh, ch4 = ImGui.Checkbox('Group sharing over actors', st.share)
     if ch4 then st.share = sh; if S.group and S.group.setEnabled then S.group.setEnabled(sh) end end
     ctext('fgFaint', 'Broadcast your damage/healing so boxes merge into one group meter.')
@@ -2296,6 +2305,7 @@ function UI.loadPrefs()
     if p.set_retention then st.retentionDays = tonumber(p.set_retention) or st.retentionDays end
     if p.set_minirows then st.miniRows = tonumber(p.set_minirows) or st.miniRows end
     if p.set_share then st.share = (p.set_share == '1') end
+    if p.set_record then st.record = (p.set_record == '1') end
     if p.set_scope then st.scope = p.set_scope
     elseif p.set_grouponly == '1' then st.scope = 'group' end -- pre-raid-scope pref
     if st.scope ~= 'group' and st.scope ~= 'raid' then st.scope = 'all' end
@@ -2334,19 +2344,25 @@ function UI.savePrefs()
     if pv ~= S._savedMiniPie then S.db:setPref('mini_pie', pv); S._savedMiniPie = pv end
     -- settings (only write on change)
     local st = S.settings
-    local sig = table.concat({ st.timeout, st.retentionDays, st.miniRows, st.share and 1 or 0, st.scope }, ',')
+    local sig = table.concat({ st.timeout, st.retentionDays, st.miniRows, st.share and 1 or 0, st.scope, st.record and 1 or 0 }, ',')
     if sig ~= S._savedSettings then
         S.db:setPref('set_timeout', st.timeout)
         S.db:setPref('set_retention', st.retentionDays)
         S.db:setPref('set_minirows', st.miniRows)
         S.db:setPref('set_share', st.share and '1' or '0')
         S.db:setPref('set_scope', st.scope)
+        S.db:setPref('set_record', st.record and '1' or '0')
         S._savedSettings = sig
     end
 end
 
 -- Expose retention setting to the main loop's prune.
 function UI.retentionDays() return S.settings.retentionDays or 14 end
+
+-- Does this character write fights to the DB? (Settings > record; the main
+-- loops gate the session start, saves, prune and XP snapshots on it.)
+function UI.recording() return S.settings.record ~= false end
+function UI.setRecording(v) S.settings.record = v and true or false end
 
 -- Compact group meter: a ranked DPS row per contributor in the current fight.
 -- Fixed/resizable (a stretch meter needs a defined width, so not auto-resize).

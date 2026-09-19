@@ -85,7 +85,7 @@ function M.init()
     end
     db = ret
     sessionStart = os.time()
-    db:startSession(server, playerName)
+    db:setIdentity(server, playerName) -- the session row starts after prefs, if recording
 
     -- always-on flight recorder (2 Hz, last 90 s) frozen onto the fight on death
     readers  = BlackBox.tloReaders()
@@ -121,16 +121,21 @@ function M.init()
         freezeBlackBox = function(nowMs) return blackbox:freeze(nowMs) end,
         onFinalize   = function(fight)
             Postmortem.stamp(fight, playerName) -- cache cause/narrative for the list + export
-            db:saveFight(fight)
-            fightsThisSession = fightsThisSession + 1
+            if UI.recording() then
+                db:saveFight(fight)
+                fightsThisSession = fightsThisSession + 1
+            end
             needRefresh = true
         end,
+        isPeerSource = function(name) return Group.isFreshPeerSource(name) end,
     })
 
     Group.init(playerName)
     Combat.setEventHook(function(ev) Group.broadcastEvent(ev) end)
+    Group.onPeerEvent = function(payload) Combat.ingestPeerEvent(payload) end
     UI.setup({ combat = Combat, db = db, playerName = playerName, group = Group })
     UI.loadPrefs()
+    if UI.recording() then db:startSession(server, playerName) end
 
     lastZone = tlo(function() return mq.TLO.Zone.ShortName() end, '')
     db:snapshotXp(tlo(function() return mq.TLO.Me.Level() end, nil), aaTotal())
@@ -176,6 +181,7 @@ function M.tick()
     end
 
     db:drainEvents(400) -- a slice of the last fight's queued event rows (see db.lua)
+    if UI.recording() and not db:sessionId() then db:startSession(server, playerName) end
     local t = mq.gettime()
     if (t - lastRaid) > 5000 then
         UI.setRaidRoster(readers.raid())
@@ -202,13 +208,13 @@ function M.tick()
         UI.savePrefs()
         lastPrefs = t
     end
-    if (t - lastXp) > 60000 then
+    if UI.recording() and (t - lastXp) > 60000 then
         db:snapshotXp(tlo(function() return mq.TLO.Me.Level() end, nil), aaTotal())
         lastXp = t
     end
     -- prune in bounded slices: one every 10 min, then every tick while more
-    -- expired rows remain (each slice releases the write lock)
-    if pruneMore or (t - lastPrune) > 600000 then
+    -- expired rows remain (each slice releases the write lock). Recorder only.
+    if UI.recording() and (pruneMore or (t - lastPrune) > 600000) then
         pruneMore = db:pruneEvents(UI.retentionDays(), 2000)
         lastPrune = t
     end

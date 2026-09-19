@@ -209,12 +209,21 @@ end
 -- ev = { source, target, ability, kind, amount, mine, myPet, isPet, incoming, outcome, line }
 -- outcome: 'hit' | 'miss' | 'resist'. `line` (when present) carries hit modifiers.
 local function record(ev)
-    if M.onEvent then
+    if M.onEvent and not ev.fromPeer then -- never re-broadcast a peer's event
         local ok, err = pcall(M.onEvent, ev)
         if not ok and not _hookErrPrinted then
             _hookErrPrinted = true
             printf('\ar[companion]\ax event hook failed (silenced): %s', tostring(err))
         end
+    end
+
+    -- A fresh companion peer reports its own damage/heals first-person
+    -- (ingestPeerEvent below), so our third-person view of that peer (and its
+    -- pet) is dropped here: same fight, exact numbers, counted once. After the
+    -- hook on purpose: external consumers still see every parsed line.
+    if not ev.mine and not ev.myPet and not ev.fromPeer and not ev.incoming
+        and cb.isPeerSource and cb.isPeerSource(ev.source) then
+        return
     end
 
     local enc = ensureActive()
@@ -975,7 +984,7 @@ function M.unregisterEvents()
 end
 
 -- ── public API ─────────────────────────────────────────────────────────
----@param opts table  { onFinalize, getPet, getZone, isRaidTarget, playerName, getMaster, getWeapons, spellDuration, getTarget, getTargetPct, freezeBlackBox }
+---@param opts table  { onFinalize, getPet, getZone, isRaidTarget, playerName, getMaster, getWeapons, spellDuration, getTarget, getTargetPct, freezeBlackBox, isPeerSource }
 function M.init(opts)
     opts = opts or {}
     for k, v in pairs(opts) do cb[k] = v end
@@ -1071,6 +1080,31 @@ function sampleMobHp()
         enc.hpEst.weight = enc.hpEst.weight + drop
     end
     enc.hpAnchorPct, enc.hpAnchorDmg = pct, dmg
+end
+
+-- ── peer ingest ───────────────────────────────────────────────────────
+-- A companion peer's `companion_events` payload (group.lua:broadcastEvent).
+-- Only the peer's OWN outgoing hits/resists/heals are taken (source is the
+-- sender or the sender's pet): peers also relay third-person lines we parse
+-- ourselves, and their incoming damage belongs to their fight, not ours.
+-- Accepted events run through record() like a third-person line would.
+---@param p table  { sender, source, target, ability, kind, amount, outcome, incoming, isPet, crit, over }
+---@return boolean ingested
+function M.ingestPeerEvent(p)
+    if type(p) ~= 'table' or not p.sender or p.incoming then return false end
+    if p.outcome ~= 'hit' and p.outcome ~= 'resist' then return false end
+    if p.kind == 'cast' or p.kind == 'kill' or p.kind == 'death' then return false end
+    local sender = tostring(p.sender):lower()
+    local source = tostring(p.source or ''):lower()
+    if source ~= sender and source ~= sender .. '`s pet' and source ~= sender .. "'s pet" then return false end
+    if p.sender == cb.playerName() then return false end
+    record {
+        source = p.source, target = p.target, ability = p.ability, kind = p.kind,
+        amount = tonumber(p.amount) or 0, over = tonumber(p.over) or nil,
+        mine = false, myPet = false, isPet = p.isPet == true, crit = p.crit == true,
+        outcome = p.outcome, fromPeer = true,
+    }
+    return true
 end
 
 -- ── time-to-kill ──────────────────────────────────────────────────────

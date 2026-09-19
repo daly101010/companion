@@ -51,7 +51,9 @@ if not db then
     return
 end
 local sessionStart = os.time()
-db:startSession(server, playerName)
+-- The session row (and with it every write) starts only when this character
+-- records fights: see UI.recording() / the `norecord` launch arg below.
+db:setIdentity(server, playerName)
 
 -- ── combat engine ──────────────────────────────────────────────────────
 local fightsThisSession = 0
@@ -114,10 +116,15 @@ Combat.init({
     onFinalize   = function(fight)
         Postmortem.stamp(fight, playerName) -- cache cause/narrative for the list + export
         Smartheal.stamp(fight)              -- sh_* columns + decision rows; resets the bucket
-        db:saveFight(fight)
-        fightsThisSession = fightsThisSession + 1
+        if UI.recording() then
+            db:saveFight(fight)
+            fightsThisSession = fightsThisSession + 1
+        end
         needRefresh = true
     end,
+    -- a fresh companion peer reports itself first-person (Group.onPeerEvent ->
+    -- Combat.ingestPeerEvent), so our third-person parse of it is dropped
+    isPeerSource = function(name) return Group.isFreshPeerSource(name) end,
 })
 
 Group.init(playerName)
@@ -138,6 +145,7 @@ end
 -- once per normalized event at record() entry; Group.broadcastEvent filters
 -- out misses/zero-amount and rides its own actor mailbox.
 Combat.setEventHook(function(ev) Group.broadcastEvent(ev) end)
+Group.onPeerEvent = function(payload) Combat.ingestPeerEvent(payload) end
 UI.setup({ combat = Combat, db = db, playerName = playerName, group = Group })
 
 -- Broadcast my current-fight summary to the group (~1 Hz, live fights only).
@@ -193,11 +201,13 @@ end)
 
 UI.loadPrefs() -- restore window geometry, filters, mode, sort
 if hasArg('mini') then UI.setMini(true) elseif hasArg('full') then UI.setMini(false) end
+if hasArg('norecord') then UI.setRecording(false) elseif hasArg('record') then UI.setRecording(true) end
+if UI.recording() then db:startSession(server, playerName) end
 if hasArg('hide') then UI.setOpen(false) end
 mq.imgui.init('Companion', UI.render)
 
-printf('\ag[companion]\ax started for \ay%s\ax on \ay%s\ax. /companion to toggle, /companion stop to quit.',
-    playerName, server)
+printf('\ag[companion]\ax started for \ay%s\ax on \ay%s\ax%s. /companion to toggle, /companion stop to quit.',
+    playerName, server, UI.recording() and '' or ' \ay(not recording)\ax')
 
 -- ── main loop ──────────────────────────────────────────────────────────
 local lastRefresh, lastXp, lastPrune, lastBcast, lastPrefs = 0, 0, 0, 0, 0
@@ -205,7 +215,7 @@ local pruneMore = false -- a prune slice reported leftover work
 local lastRaid = 0
 local lastZone = tlo(function() return mq.TLO.Zone.ShortName() end, '')
 
--- one XP snapshot at login so the trend has an anchor
+-- one XP snapshot at login so the trend has an anchor (no-op without a session)
 db:snapshotXp(tlo(function() return mq.TLO.Me.Level() end, nil), aaTotal())
 
 while running and mq.TLO.MacroQuest.GameState() == 'INGAME' do
@@ -231,6 +241,8 @@ while running and mq.TLO.MacroQuest.GameState() == 'INGAME' do
     end
 
     db:drainEvents(400) -- a slice of the last fight's queued event rows (see db.lua)
+    -- recording toggled on at runtime: open the session then (never re-opened)
+    if UI.recording() and not db:sessionId() then db:startSession(server, playerName) end
     local t = mq.gettime()
     if (t - lastRaid) > 5000 then -- raid roster for the meter's raid scope
         UI.setRaidRoster(readers.raid())
@@ -253,13 +265,13 @@ while running and mq.TLO.MacroQuest.GameState() == 'INGAME' do
         UI.savePrefs() -- persist any changed window/filter/mode/sort state
         lastPrefs = t
     end
-    if (t - lastXp) > 60000 then
+    if UI.recording() and (t - lastXp) > 60000 then
         db:snapshotXp(tlo(function() return mq.TLO.Me.Level() end, nil), aaTotal())
         lastXp = t
     end
     -- prune in bounded slices: one every 10 min, then every tick while more
-    -- expired rows remain (each slice releases the write lock)
-    if pruneMore or (t - lastPrune) > 600000 then
+    -- expired rows remain (each slice releases the write lock). Recorder only.
+    if UI.recording() and (pruneMore or (t - lastPrune) > 600000) then
         pruneMore = db:pruneEvents(UI.retentionDays(), 2000)
         lastPrune = t
     end

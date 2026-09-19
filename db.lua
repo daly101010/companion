@@ -316,9 +316,16 @@ function DB:_bindChar(stmt, n)
 end
 
 -- ── sessions ──────────────────────────────────────────────────────────
-function DB:startSession(server, character)
-    -- remember identity: history queries scope to this server+character
+-- Identity alone (no session row): history queries scope to it. A box that
+-- does not record fights (Settings > record) sets this and never starts a
+-- session, so saveFight/snapshotXp no-op while the history stays readable.
+function DB:setIdentity(server, character)
     self._server, self._char = server or 'unknown', character or 'unknown'
+end
+
+function DB:startSession(server, character)
+    if self._sessionId then return self._sessionId end -- already recording
+    self:setIdentity(server, character)
     local stmt = self:_prepare("INSERT INTO session(server, character, started_at) VALUES(?,?,?);")
     if not stmt then return nil end
     stmt:bind(1, self._server)
